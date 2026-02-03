@@ -7,6 +7,7 @@
  - Language: Python
  - Database: SQLite
 ### 3. Structure
+```text
 webnovel_trends/
 ├── outputs/
 │   ├── data
@@ -32,7 +33,7 @@ webnovel_trends/
 ├── requirements.txt         # 依赖列表
 ├── main.py                  # 主程序入口
 └── README.md               # 项目说明
-
+```
 
 
 ### 1. 安装依赖
