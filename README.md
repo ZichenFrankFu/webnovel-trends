@@ -32,7 +32,7 @@ webnovel_trends/
 │   └── reports/             # 分析报告
 ├── requirements.txt         # 依赖列表
 ├── main.py                  # 主程序入口
-└── README.md               # 项目说明
+└── README.md                # 项目说明
 ```
 
 

@@ -79,6 +79,7 @@ class DatabaseHandler:
             CREATE TABLE IF NOT EXISTS novel_chapters (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 novel_id TEXT NOT NULL,
+                novel_title TEXT NOT NULL,
                 chapter_num INTEGER NOT NULL,
                 chapter_title TEXT NOT NULL,
                 chapter_content TEXT,
@@ -589,6 +590,9 @@ class DatabaseHandler:
                             # 如果格式不正确，设为空
                             first_post_time = ''
 
+                    # 获取小说标题（从章节数据中获取）
+                    novel_title = chapter.get('novel_title', '')
+
                     # 先检查是否已存在相同章节
                     cursor.execute('''
                     SELECT id FROM novel_chapters 
@@ -601,10 +605,11 @@ class DatabaseHandler:
                         # 更新现有章节
                         cursor.execute('''
                         UPDATE novel_chapters 
-                        SET chapter_title = ?, chapter_content = ?, chapter_url = ?, 
+                        SET novel_title = ?, chapter_title = ?, chapter_content = ?, chapter_url = ?, 
                             word_count = ?, first_post_time = ?, extract_date = ?
                         WHERE id = ?
                         ''', (
+                            novel_title,  # 添加小说标题
                             chapter['chapter_title'],
                             chapter.get('chapter_content', ''),
                             chapter.get('chapter_url', ''),
@@ -614,13 +619,14 @@ class DatabaseHandler:
                             existing_chapter[0]
                         ))
                     else:
-                        # 插入新章节
+                        # 插入新章节 - 修复SQL语句参数顺序
                         cursor.execute('''
-                        INSERT INTO novel_chapters 
-                        (novel_id, chapter_num, chapter_title, chapter_content, chapter_url, word_count, first_post_time, extract_date)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT OR IGNORE INTO novel_chapters 
+                        (novel_id, novel_title, chapter_num, chapter_title, chapter_content, chapter_url, word_count, first_post_time, extract_date) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (
                             novel_id,
+                            novel_title,  # 小说标题
                             chapter['chapter_num'],
                             chapter['chapter_title'],
                             chapter.get('chapter_content', ''),
@@ -678,6 +684,11 @@ class DatabaseHandler:
         if not chapter_title or len(chapter_title) < 1:
             self.logger.warning(f"章节标题无效: {chapter_title}")
             return False
+
+        # 验证小说标题（可选，但建议有）
+        if 'novel_title' not in chapter_data:
+            self.logger.warning(f"章节数据缺少novel_title字段，但将继续保存")
+            # 不返回False，因为novel_title不是必需字段
 
         return True
 

@@ -254,7 +254,6 @@ class QidianSpider(BaseSpider):
             return '未知分类'
 
     """解析单个书籍项目（提取分类）"""
-
     def _parse_book_item(self, item, index, rank_type, page):
         try:
             # 获取书籍ID
@@ -677,7 +676,7 @@ class QidianSpider(BaseSpider):
         chapter_links = []
 
         try:
-            self.logger.info("开始使用新路径提取章节链接...")
+            self.logger.info("开始提取章节链接...")
 
             # 方法1：使用精确路径
             # div.book-detail-mid -> div.book-info-outer -> div.book-catalog.jsAutoReport ->
@@ -690,109 +689,139 @@ class QidianSpider(BaseSpider):
                 catalog_volumes = catalog_all.select('div.catalog-volume')
                 self.logger.info(f'找到 {len(catalog_volumes)} 个分卷')
 
-                # 跳过第一个卷（通常是"作品相关"），从第二个开始
-                for volume_index, volume in enumerate(catalog_volumes[1:], start=2):
-                    # 检查卷标题是否包含"作品相关"
+                # 寻找第一个有效分卷（章节数>=15的正文卷）
+                target_volume = None
+                for volume_index, volume in enumerate(catalog_volumes):
                     volume_title_elem = volume.select_one('h3.volume-title')
-                    volume_title = volume_title_elem.text.strip() if volume_title_elem else f'分卷{volume_index}'
+                    volume_title = volume_title_elem.text.strip() if volume_title_elem else f'分卷{volume_index + 1}'
+
+                    # 跳过"作品相关"卷
+                    if '作品相关' in volume_title:
+                        self.logger.info(f'跳过作品相关卷: {volume_title}')
+                        continue
 
                     # 查找章节列表
                     chapters_list = volume.select_one('ul.volume-chapters')
                     if not chapters_list:
-                        self.logger.warning(f'分卷 {volume_index} 没有找到volume-chapters')
+                        self.logger.warning(f'分卷 {volume_index + 1} ({volume_title}) 没有找到volume-chapters')
                         continue
 
                     # 获取所有章节项
                     chapter_items = chapters_list.select('li.chapter-item')
-                    self.logger.info(f'分卷 {volume_index} ({volume_title}) 有 {len(chapter_items)} 个章节')
+                    chapter_count = len(chapter_items)
+                    self.logger.info(f'分卷 {volume_index + 1} ({volume_title}) 有 {chapter_count} 个章节')
 
-                    for item_index, item in enumerate(chapter_items):
-                        try:
-                            # 提取章节链接和标题
-                            chapter_link = item.select_one('a')
-                            if not chapter_link:
-                                continue
+                    # 判断分卷是否有效：章节数>=15
+                    if chapter_count < 15:
+                        self.logger.warning(
+                            f'分卷 {volume_index + 1} ({volume_title}) 章节数{chapter_count} < 10，跳过此分卷')
+                        continue
+                    else:
+                        target_volume = volume
+                        self.logger.info(f'找到有效分卷: {volume_title} (章节数: {chapter_count})')
+                        break
 
-                            href = chapter_link.get('href', '')
-                            link_text = chapter_link.text.strip()  # 可能包含章节名和其他信息
+                if not target_volume:
+                    self.logger.warning('未找到有效分卷（章节数>=15）')
+                    return []
 
-                            # 提取title属性中的信息
-                            title_attr = chapter_link.get('title', '')
+                # 查找目标卷的章节列表
+                chapters_list = target_volume.select_one('ul.volume-chapters')
+                if not chapters_list:
+                    self.logger.warning('正文卷没有找到volume-chapters')
+                    return []
 
-                            # 如果没有href，尝试其他方式
-                            if not href:
-                                # 尝试从data-chapterid属性获取
-                                data_chapterid = item.get('data-chapterid')
-                                if data_chapterid:
-                                    href = f'/chapter/{book_id}/{data_chapterid}/'
+                # 获取所有章节项
+                chapter_items = chapters_list.select('li.chapter-item')
+                self.logger.info(f'正文卷有 {len(chapter_items)} 个章节')
 
-                            if href:
-                                # 处理相对URL
-                                if href.startswith('//'):
-                                    chapter_url = 'https:' + href
-                                elif href.startswith('/'):
-                                    chapter_url = urljoin(self.base_url, href)
-                                elif href.startswith('http'):
-                                    chapter_url = href
-                                else:
-                                    # 尝试构建URL
-                                    match = re.search(r'/chapter/(\d+)/(\d+)', href)
-                                    if match:
-                                        chapter_id = match.group(2)
-                                        chapter_url = f'https://www.qidian.com/chapter/{book_id}/{chapter_id}/'
-                                    else:
-                                        continue
-
-                                # 提取章节信息
-                                chapter_info = {
-                                    'href': href,
-                                    'url': chapter_url,
-                                    'link_text': link_text,
-                                    'title_attr': title_attr
-                                }
-
-                                # 从title属性中提取首发时间、字数和章节名
-                                if title_attr:
-                                    # title_attr格式可能为："首发时间：2023-01-01 字数：3000 章节名：第一章"
-                                    import re
-                                    time_match = re.search(r'首发时间[：:]?\s*(\d{4}-\d{2}-\d{2})', title_attr)
-                                    word_match = re.search(r'字数[：:]?\s*(\d+)', title_attr)
-                                    chapter_match = re.search(r'章节名[：:]?\s*(.+)', title_attr)
-
-                                    if time_match:
-                                        chapter_info['first_post_time'] = time_match.group(1)
-                                    if word_match:
-                                        chapter_info['word_count'] = int(word_match.group(1))
-                                    if chapter_match:
-                                        chapter_info['chapter_name'] = chapter_match.group(1)
-
-                                # 如果没有从title属性提取到章节名，使用link_text
-                                if 'chapter_name' not in chapter_info and link_text:
-                                    # 清理link_text，移除多余信息
-                                    chapter_name = link_text
-                                    # 移除可能的时间、字数信息
-                                    chapter_name = re.sub(r'\d{4}-\d{2}-\d{2}\s*', '', chapter_name)
-                                    chapter_name = re.sub(r'\d+字\s*', '', chapter_name)
-                                    chapter_info['chapter_name'] = chapter_name.strip()
-
-                                # 确保有章节名
-                                if 'chapter_name' not in chapter_info or not chapter_info['chapter_name']:
-                                    # 使用默认章节名
-                                    chapter_info['chapter_name'] = f'第{item_index + 1}章'
-
-                                chapter_links.append(chapter_info)
-
-                                # 如果已经找到足够多的章节，可以提前退出
-                                if len(chapter_links) >= 20:  # 多找一些，以防后面有无效链接
-                                    self.logger.info(f'已找到足够章节，停止在当前分卷搜索')
-                                    break
-
-                        except Exception as e:
-                            self.logger.debug(f'解析章节链接失败: {e}')
+                for item_index, item in enumerate(chapter_items):
+                    try:
+                        # 提取章节链接和标题
+                        chapter_link = item.select_one('a')
+                        if not chapter_link:
                             continue
 
+                        href = chapter_link.get('href', '')
+                        link_text = chapter_link.text.strip()  # 可能包含章节名和其他信息
+
+                        # 提取title属性中的信息
+                        title_attr = chapter_link.get('title', '')
+
+                        # 如果没有href，尝试其他方式
+                        if not href:
+                            # 尝试从data-chapterid属性获取
+                            data_chapterid = item.get('data-chapterid')
+                            if data_chapterid:
+                                href = f'/chapter/{book_id}/{data_chapterid}/'
+
+                        if href:
+                            # 处理相对URL
+                            if href.startswith('//'):
+                                chapter_url = 'https:' + href
+                            elif href.startswith('/'):
+                                chapter_url = urljoin(self.base_url, href)
+                            elif href.startswith('http'):
+                                chapter_url = href
+                            else:
+                                # 尝试构建URL
+                                match = re.search(r'/chapter/(\d+)/(\d+)', href)
+                                if match:
+                                    chapter_id = match.group(2)
+                                    chapter_url = f'https://www.qidian.com/chapter/{book_id}/{chapter_id}/'
+                                else:
+                                    continue
+
+                            # 提取章节信息
+                            chapter_info = {
+                                'href': href,
+                                'url': chapter_url,
+                                'link_text': link_text,
+                                'title_attr': title_attr
+                            }
+
+                            # 从title属性中提取首发时间、字数和章节名
+                            if title_attr:
+                                # title_attr格式可能为："首发时间：2023-01-01 字数：3000 章节名：第一章"
+                                import re
+                                time_match = re.search(r'首发时间[：:]?\s*(\d{4}-\d{2}-\d{2})', title_attr)
+                                word_match = re.search(r'字数[：:]?\s*(\d+)', title_attr)
+                                chapter_match = re.search(r'章节名[：:]?\s*(.+)', title_attr)
+
+                                if time_match:
+                                    chapter_info['first_post_time'] = time_match.group(1)
+                                if word_match:
+                                    chapter_info['word_count'] = int(word_match.group(1))
+                                if chapter_match:
+                                    chapter_info['chapter_name'] = chapter_match.group(1)
+
+                            # 如果没有从title属性提取到章节名，使用link_text
+                            if 'chapter_name' not in chapter_info and link_text:
+                                # 清理link_text，移除多余信息
+                                chapter_name = link_text
+                                # 移除可能的时间、字数信息
+                                chapter_name = re.sub(r'\d{4}-\d{2}-\d{2}\s*', '', chapter_name)
+                                chapter_name = re.sub(r'\d+字\s*', '', chapter_name)
+                                chapter_info['chapter_name'] = chapter_name.strip()
+
+                            # 确保有章节名
+                            if 'chapter_name' not in chapter_info or not chapter_info['chapter_name']:
+                                # 使用默认章节名
+                                chapter_info['chapter_name'] = f'第{item_index + 1}章'
+
+                            chapter_links.append(chapter_info)
+
+                            # 如果已经找到足够多的章节，可以提前退出
+                            if len(chapter_links) >= 20:  # 多找一些，以防后面有无效链接
+                                self.logger.info(f'已找到足够章节，停止在当前分卷搜索')
+                                break
+
+                    except Exception as e:
+                        self.logger.debug(f'解析章节链接失败: {e}')
+                        continue
+
                     # 如果已经找到足够章节，跳出循环
-                    if len(chapter_links) >= 20:
+                    if len(chapter_links) >= 25:
                         break
 
             # 方法2：如果新路径没找到，尝试其他选择器
@@ -940,7 +969,7 @@ class QidianSpider(BaseSpider):
                     paragraph_texts = []
                     for p in paragraphs:
                         text = p.get_text(strip=True)
-                        if text and len(text) > 10:  # 过滤过短的文本
+                        if text and len(text) >3:  # 过滤过短的文本
                             paragraph_texts.append(text)
 
                     if paragraph_texts:
@@ -1019,6 +1048,42 @@ class QidianSpider(BaseSpider):
             self.logger.error(f'获取章节内容失败 {chapter_url}: {e}')
             return None
 
+    """从目录页提取小说标题"""
+
+    def _extract_novel_title_from_catalog(self, soup, book_id):
+        """从目录页提取小说标题"""
+        try:
+            # 方法1: 从meta标签提取
+            title_meta = soup.select_one('meta[property="og:title"]')
+            if title_meta:
+                novel_title = title_meta.get('content', '').strip()
+                # 清理标题，移除可能的后缀
+                if ' - ' in novel_title:
+                    novel_title = novel_title.split(' - ')[0]
+                return novel_title
+
+            # 方法2: 从h1标签提取
+            h1_title = soup.select_one('h1.book-title, h1.works-title, .book-info h1')
+            if h1_title and h1_title.text.strip():
+                return h1_title.text.strip()
+
+            # 方法3: 尝试从面包屑导航提取
+            breadcrumb = soup.select_one('.crumb, .breadcrumb, .site-nav')
+            if breadcrumb:
+                breadcrumb_text = breadcrumb.get_text()
+                if '>' in breadcrumb_text:
+                    parts = breadcrumb_text.split('>')
+                    if parts:
+                        return parts[-1].strip()
+
+            # 方法4: 从URL中获取的book_id构建
+            # 如果没有找到标题，返回一个默认标题
+            return f'小说_{book_id}'
+
+        except Exception as e:
+            self.logger.debug(f'从目录页提取标题失败: {e}')
+            return f'小说_{book_id}'
+
     """从网站抓取小说章节内容"""
     def _fetch_novel_chapters_from_website(self, novel_url, novel_id, chapter_count):
         try:
@@ -1068,6 +1133,9 @@ class QidianSpider(BaseSpider):
 
             catalog_soup = BeautifulSoup(catalog_html, 'html.parser')
 
+            # 从目录页提取书籍标题
+            novel_title = self._extract_novel_title_from_catalog(catalog_soup, book_id)
+
             # 提取章节链接
             chapter_infos = self._extract_chapter_links(catalog_soup, book_id)
 
@@ -1093,7 +1161,8 @@ class QidianSpider(BaseSpider):
                             'chapter_content': chapter_content,
                             'chapter_url': chapter_url,
                             'first_post_time': first_post_time,
-                            'word_count': word_count
+                            'word_count': word_count,
+                            'novel_title': novel_title
                         }
 
                         chapters.append(chapter_data)
@@ -1116,7 +1185,6 @@ class QidianSpider(BaseSpider):
             return []
 
     """先检查数据库是否已有，然后获取小说前N章内容"""
-
     def fetch_novel_chapters(self, novel_url, novel_id='', chapter_count=None):
         """获取小说前N章内容
 
@@ -1139,6 +1207,12 @@ class QidianSpider(BaseSpider):
         self.logger.info(f'获取小说章节内容: {novel_url} (小说ID: {novel_id}, 章节数: {chapter_count})')
 
         try:
+            # 先获取书籍详情（用于获取标题）
+            detail = self.fetch_novel_detail(novel_url, novel_id)
+
+            # 从详情中提取书名
+            novel_title = detail.get('title', '') if detail else ''
+
             # 检查数据库是否已有章节
             should_extract = True
             chapters = []
@@ -1200,6 +1274,12 @@ class QidianSpider(BaseSpider):
 
             # 需要从网站抓取章节
             chapters = self._fetch_novel_chapters_from_website(novel_url, novel_id, chapter_count)
+
+            # 确保每个章节都有novel_title
+            for chapter in chapters:
+                if not chapter.get('novel_title') and novel_title:
+                    chapter['novel_title'] = novel_title
+
             return chapters
 
         except Exception as e:
