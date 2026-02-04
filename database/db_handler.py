@@ -287,7 +287,7 @@ class DatabaseHandler:
         """更新小说档案表"""
         # 检查小说是否已存在
         cursor.execute('SELECT novel_id, first_seen FROM novel_archive WHERE novel_id = ?',
-                       (book_data['novel_id'],))
+                    (book_data['novel_id'],))
         result = cursor.fetchone()
 
         # 获取简介
@@ -299,6 +299,14 @@ class DatabaseHandler:
         if not url and 'novel_url' in book_data:
             url = book_data['novel_url']
 
+        # Calculate HAS_CHAPTERS and CHAPTERS_COUNT
+        cursor.execute('''
+        SELECT COUNT(*) FROM novel_chapters
+        WHERE novel_id = ?
+        ''', (book_data['novel_id'],))
+        chapters_count = cursor.fetchone()[0]
+        has_chapters = 1 if chapters_count > 0 else 0
+
         if result:
             # 更新现有记录
             novel_id, first_seen = result
@@ -306,7 +314,7 @@ class DatabaseHandler:
             cursor.execute('''
             UPDATE novel_archive 
             SET title = ?, author = ?, category = ?, introduction = ?, 
-                url = ?, last_updated = ?
+                url = ?, last_updated = ?, has_chapters = ?, chapters_count = ?
             WHERE novel_id = ?
             ''', (
                 book_data['title'],
@@ -315,14 +323,16 @@ class DatabaseHandler:
                 intro,
                 url,
                 book_data['fetch_date'],
+                has_chapters,
+                chapters_count,
                 book_data['novel_id']
             ))
         else:
             # 插入新记录
             cursor.execute('''
             INSERT OR REPLACE INTO novel_archive 
-            (novel_id, platform, title, author, category, introduction, url, first_seen, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (novel_id, platform, title, author, category, introduction, url, first_seen, last_updated, has_chapters, chapters_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 book_data['novel_id'],
                 book_data['platform'],
@@ -332,7 +342,9 @@ class DatabaseHandler:
                 intro,
                 url,
                 book_data['fetch_date'],
-                book_data['fetch_date']
+                book_data['fetch_date'],
+                has_chapters,
+                chapters_count
             ))
 
     def check_novel_exists(self, title, author, platform='qidian'):
@@ -487,10 +499,25 @@ class DatabaseHandler:
                     url = novel_data['novel_url']
 
                 # 保存小说基本信息到novel_archive表
+                # 检查是否已存在此小说
+                cursor.execute('SELECT has_chapters, chapters_count FROM novel_archive WHERE novel_id = ?',
+                              (novel_data['novel_id'],))
+                existing_record = cursor.fetchone()
+                
+                # 如果记录已存在且没有传入新章节，保留现有的chapters信息
+                if existing_record and not chapters:
+                    existing_has_chapters, existing_chapters_count = existing_record
+                    has_chap = existing_has_chapters
+                    chap_count = existing_chapters_count
+                else:
+                    # 如果没有现有记录或传入了新章节，使用新的章节信息
+                    has_chap = 1 if (chapters and len(chapters) > 0) else 0
+                    chap_count = len(chapters) if chapters else 0
+                
                 cursor.execute('''
                 INSERT OR REPLACE INTO novel_archive 
-                (novel_id, platform, title, author, category, introduction, url, first_seen, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (novel_id, platform, title, author, category, introduction, url, first_seen, last_updated, has_chapters, chapters_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     novel_data['novel_id'],
                     novel_data['platform'],
@@ -500,7 +527,9 @@ class DatabaseHandler:
                     novel_data.get('introduction', ''),
                     url,
                     novel_data.get('first_seen', datetime.now().strftime('%Y-%m-%d')),
-                    datetime.now().strftime('%Y-%m-%d')
+                    datetime.now().strftime('%Y-%m-%d'),
+                    has_chap,  # has_chapters
+                    chap_count  # chapters_count
                 ))
 
                 # 如果有章节内容，保存章节
@@ -642,16 +671,17 @@ class DatabaseHandler:
 
             # 更新novel_archive表的章节信息
             cursor.execute('''
+            SELECT COUNT(*) FROM novel_chapters WHERE novel_id = ?
+            ''', (novel_id,))
+            chapter_count = cursor.fetchone()[0]
+            
+            cursor.execute('''
             UPDATE novel_archive 
-            SET has_chapters = 1, 
-                chapters_count = (
-                    SELECT COUNT(*) 
-                    FROM novel_chapters 
-                    WHERE novel_id = ?
-                ),
+            SET has_chapters = ?, 
+                chapters_count = ?,
                 chapters_last_extracted = ?
             WHERE novel_id = ?
-            ''', (novel_id, today, novel_id))
+            ''', (1 if chapter_count > 0 else 0, chapter_count, today, novel_id))
 
             if close_conn and conn:
                 conn.commit()

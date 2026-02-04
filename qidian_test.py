@@ -349,6 +349,9 @@ def test_qidian_features_safe():
                                     'tags': book.get('tags', []),
                                 }
 
+                                # 注意：如果这本书在之前已经被保存过（带有章节），
+                                # 这里的save_novel调用会重置chapters_count为0！
+                                # 为了避免这种情况，应该检查书籍是否已经存在
                                 if db.save_novel(novel_data):
                                     print(f"         小说信息save_novel保存成功")
                                 else:
@@ -471,8 +474,8 @@ def test_qidian_features_safe():
 
                     # 查询已保存的小说基本信息
                     cursor.execute('''
-                        SELECT novel_id, title, author, category, 
-                               (SELECT COUNT(*) FROM novel_chapters WHERE novel_archive.novel_id = novel_chapters.novel_id) as chapters_count
+                        SELECT novel_id, title, author, category, has_chapters, chapters_count,
+                               (SELECT COUNT(*) FROM novel_chapters WHERE novel_archive.novel_id = novel_chapters.novel_id) as actual_chapters_count
                         FROM novel_archive 
                         WHERE platform = 'qidian'
                         ORDER BY created_at DESC
@@ -482,8 +485,11 @@ def test_qidian_features_safe():
                     novel_results = cursor.fetchall()
                     print(f"   数据库中起点小说基本信息: {len(novel_results)} 本")
 
-                    for novel_id, title, author, category, chapters_count in novel_results:
-                        print(f"     《{title[:15]}...》 - {author} ({category}) 章节数:{chapters_count}")
+                    for novel_id, title, author, category, has_chapters, chapters_count, actual_count in novel_results:
+                        print(f"     《{title[:15]}...》 - {author} ({category})")
+                        print(f"       - has_chapters: {has_chapters}, chapters_count: {chapters_count}, 实际章节数: {actual_count}")
+                        if chapters_count != actual_count:
+                            print(f"       ⚠️  WARNING: stored chapters_count({chapters_count}) != actual count({actual_count})")
 
                     # 查询章节信息
                     cursor.execute('''
