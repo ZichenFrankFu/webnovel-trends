@@ -1185,8 +1185,9 @@ class QidianSpider(BaseSpider):
             return []
 
     """先检查数据库是否已有，然后获取小说前N章内容"""
+
     def fetch_novel_chapters(self, novel_url, novel_id='', chapter_count=None):
-        """获取小说前N章内容
+        """获取小说前N章内容（智能补全：只获取缺失的章节）
 
         Args:
             novel_url: 小说详情页URL
@@ -1213,77 +1214,188 @@ class QidianSpider(BaseSpider):
             # 从详情中提取书名
             novel_title = detail.get('title', '') if detail else ''
 
-            # 检查数据库是否已有章节
-            should_extract = True
-            chapters = []
+            # 检查数据库中已有的章节
+            existing_chapter_count = 0
+            existing_chapters = []
 
             if self.db_handler:
-                # 方法1：尝试使用 check_novel_exists_by_url 方法（如果存在）
-                try:
-                    if hasattr(self.db_handler, 'check_novel_exists_by_url'):
-                        novel_check = self.db_handler.check_novel_exists_by_url(novel_url)
-                        if novel_check['exists'] and novel_check['has_chapters']:
-                            if novel_check['chapters_count'] >= chapter_count:
-                                self.logger.info(f'数据库已有{novel_check["chapters_count"]}章，直接加载')
-                                # 从数据库加载章节
-                                db_chapters = self.db_handler.get_novel_chapters(novel_check['novel_id'], chapter_count)
-                                if db_chapters:
-                                    for db_chapter in db_chapters:
-                                        chapters.append({
-                                            'chapter_num': db_chapter['chapter_num'],
-                                            'chapter_title': db_chapter['chapter_title'],
-                                            'chapter_content': db_chapter['chapter_content'],
-                                            'chapter_url': db_chapter['chapter_url']
-                                        })
-                                    return chapters
-                                else:
-                                    self.logger.info('数据库章节加载失败，重新抓取')
-                            else:
-                                self.logger.info(f'数据库只有{novel_check["chapters_count"]}章，需要补充')
-                    else:
-                        # 方法2：使用 check_novel_exists 方法
-                        # 先获取小说详情以得到标题和作者
-                        detail = self.fetch_novel_detail(novel_url, novel_id)
-                        if detail and 'title' in detail and 'author' in detail:
-                            novel_check = self.db_handler.check_novel_exists(detail['title'], detail['author'],
-                                                                             'qidian')
-                            if novel_check['exists']:
-                                # 检查是否有章节
-                                if novel_check['has_chapters'] and novel_check['chapters_count'] >= chapter_count:
-                                    self.logger.info(f'数据库已有{novel_check["chapters_count"]}章，直接加载')
-                                    # 从数据库加载章节
-                                    db_chapters = self.db_handler.get_novel_chapters(novel_check['novel_id'],
-                                                                                     chapter_count)
-                                    if db_chapters:
-                                        for db_chapter in db_chapters:
-                                            chapters.append({
-                                                'chapter_num': db_chapter['chapter_num'],
-                                                'chapter_title': db_chapter['chapter_title'],
-                                                'chapter_content': db_chapter['chapter_content'],
-                                                'chapter_url': db_chapter['chapter_url']
-                                            })
-                                        return chapters
-                                    else:
-                                        self.logger.info('数据库章节加载失败，重新抓取')
-                                else:
-                                    self.logger.info(f'数据库只有{novel_check["chapters_count"]}章或没有章节，需要补充')
-                        else:
-                            self.logger.info('无法获取小说详情，直接抓取章节')
-                except Exception as e:
-                    self.logger.warning(f'数据库检查失败，将直接抓取章节: {e}')
+                # 获取数据库中已有的章节数量
+                existing_chapter_count = self.db_handler.get_chapters_count(novel_id)
+                self.logger.info(f'数据库中已有章节数: {existing_chapter_count}')
 
-            # 需要从网站抓取章节
-            chapters = self._fetch_novel_chapters_from_website(novel_url, novel_id, chapter_count)
+                # 如果已有章节数 >= 目标章节数，直接从数据库加载
+                if existing_chapter_count >= chapter_count:
+                    self.logger.info(f'数据库已有{existing_chapter_count}章，足够，直接从数据库加载')
+                    db_chapters = self.db_handler.get_novel_chapters(novel_id, chapter_count)
 
-            # 确保每个章节都有novel_title
-            for chapter in chapters:
-                if not chapter.get('novel_title') and novel_title:
-                    chapter['novel_title'] = novel_title
+                    # 为每个章节添加novel_title
+                    for db_chapter in db_chapters:
+                        db_chapter['novel_title'] = novel_title
+                    return db_chapters
 
-            return chapters
+                # 如果已有章节，获取已存在的章节信息
+                if existing_chapter_count > 0:
+                    existing_chapters = self.db_handler.get_novel_chapters(novel_id, existing_chapter_count)
+                    self.logger.info(f'从数据库加载了{len(existing_chapters)}个现有章节')
+
+            # 需要从网站抓取的新章节数
+            need_chapter_count = chapter_count - existing_chapter_count
+            if need_chapter_count <= 0:
+                self.logger.info('不需要抓取新章节')
+                return existing_chapters[:chapter_count]  # 只返回需要的数量
+
+            self.logger.info(
+                f'需要抓取{need_chapter_count}个新章节（已有{existing_chapter_count}章，目标{chapter_count}章）')
+
+            # 获取现有的最大章节号
+            max_existing_chapter_num = 0
+            if existing_chapters:
+                max_existing_chapter_num = max([ch.get('chapter_num', 0) for ch in existing_chapters])
+
+            # 从网站抓取章节（从下一章开始）
+            new_chapters = self._fetch_novel_chapters_with_offset(
+                novel_url,
+                novel_id,
+                need_chapter_count,
+                start_offset=max_existing_chapter_num
+            )
+
+            if not new_chapters:
+                self.logger.warning('未能获取到新章节')
+                return existing_chapters[:chapter_count]
+
+            # 确保每个新章节都有novel_title
+            for chapter in new_chapters:
+                chapter['novel_title'] = novel_title
+
+            # 合并现有章节和新章节
+            all_chapters = existing_chapters + new_chapters
+
+            # 确保章节号连续
+            for i, chapter in enumerate(all_chapters, 1):
+                chapter['chapter_num'] = i
+
+            # 保存新章节到数据库
+            if self.db_handler and new_chapters:
+                self.logger.info(f'保存{len(new_chapters)}个新章节到数据库')
+                # 准备小说基本信息
+                novel_data = {
+                    'novel_id': novel_id,
+                    'title': novel_title,
+                    'author': detail.get('author', '未知') if detail else '未知',
+                    'platform': 'qidian',
+                    'novel_url': novel_url,
+                    'category': detail.get('category', '') if detail else '',
+                    'introduction': detail.get('introduction', '') if detail else '',
+                    'tags': detail.get('tags', []) if detail else [],
+                }
+
+                # 只保存新章节
+                self.db_handler.save_novel(novel_data, new_chapters)
+
+            # 只返回需要的数量
+            return all_chapters[:chapter_count]
 
         except Exception as e:
             self.logger.error(f'获取小说章节内容失败 {novel_url}: {e}')
+            return []
+
+    def _fetch_novel_chapters_with_offset(self, novel_url, novel_id, chapter_count, start_offset=0):
+        """从指定偏移量开始抓取章节内容
+
+        Args:
+            novel_url: 小说详情页URL
+            novel_id: 小说ID
+            chapter_count: 要获取的章节数
+            start_offset: 起始偏移量（跳过前start_offset章）
+
+        Returns:
+            list: 章节内容列表
+        """
+        try:
+            # 从小说URL提取book_id
+            book_id_match = re.search(r'/book/(\d+)', novel_url)
+            if not book_id_match:
+                self.logger.warning(f'无法从URL提取book_id: {novel_url}')
+                return []
+
+            book_id = book_id_match.group(1)
+
+            # 构建目录页面URL
+            catalog_url = f'https://book.qidian.com/info/{book_id}/#Catalog'
+            self.logger.info(f'访问目录页: {catalog_url} (跳过前{start_offset}章)')
+
+            # 访问目录页面
+            self.driver.get(catalog_url)
+            time.sleep(random.uniform(3, 5))
+
+            # 等待目录加载完成
+            try:
+                wait = WebDriverWait(self.driver, 15)
+                # 等待目录区域出现
+                wait.until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "div.catalog-all, div.catalog-volume, ul.volume-chapters"))
+                )
+                time.sleep(2)
+            except TimeoutException:
+                self.logger.warning("目录加载超时，尝试继续解析")
+
+            # 获取目录页面源码
+            catalog_html = self.driver.page_source
+            catalog_soup = BeautifulSoup(catalog_html, 'html.parser')
+
+            # 提取章节链接
+            chapter_infos = self._extract_chapter_links(catalog_soup, book_id)
+
+            if not chapter_infos:
+                self.logger.warning(f'未找到章节链接: {novel_url}')
+                return []
+
+            # 跳过前start_offset章，取接下来的chapter_count章
+            if start_offset < len(chapter_infos):
+                chapter_infos = chapter_infos[start_offset:start_offset + chapter_count]
+            else:
+                self.logger.warning(f'起始偏移量{start_offset}超出目录范围（共{len(chapter_infos)}章）')
+                return []
+
+            self.logger.info(f'将从第{start_offset + 1}章开始抓取，共{len(chapter_infos)}章')
+
+            chapters = []
+
+            for i, (chapter_title, chapter_url, first_post_time, word_count) in enumerate(chapter_infos, 1):
+                self.logger.info(f'获取第{start_offset + i}章: {chapter_title}')
+
+                try:
+                    chapter_content = self._fetch_single_chapter(chapter_url)
+
+                    if chapter_content:
+                        chapter_data = {
+                            'chapter_num': start_offset + i,  # 实际的全局章节号
+                            'chapter_title': chapter_title,
+                            'chapter_content': chapter_content,
+                            'chapter_url': chapter_url,
+                            'first_post_time': first_post_time,
+                            'word_count': word_count
+                        }
+
+                        chapters.append(chapter_data)
+
+                    # 章节间延迟
+                    if i < len(chapter_infos):
+                        delay = random.uniform(2, 4)
+                        self.logger.debug(f'等待{delay:.1f}秒后获取下一章')
+                        time.sleep(delay)
+
+                except Exception as e:
+                    self.logger.error(f'获取章节失败 {chapter_title}: {e}')
+                    continue
+
+            self.logger.info(f'成功获取 {len(chapters)} 章新内容')
+            return chapters
+
+        except Exception as e:
+            self.logger.error(f'获取章节列表失败: {e}')
             return []
 
 

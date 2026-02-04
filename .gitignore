@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+
+# logs
+logs/
+
+# outputs
+outputs/
+
+# your test folder
+test_output/
+
+# OS junk
+.DS_Store
+Thumbs.db
