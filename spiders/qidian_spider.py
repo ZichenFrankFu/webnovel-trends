@@ -89,7 +89,7 @@ class QidianSpider(BaseSpider):
         self.db_handler = db_handler
 
         self.book_cache: Dict[str, Dict[str, Any]] = {}
-        self.retry_count = 0
+        self.retry_count = 5
         self.max_retries = int(site_config.get("max_retries", 3))
 
         self.selenium_config = self._build_selenium_config()
@@ -123,7 +123,7 @@ class QidianSpider(BaseSpider):
                 "excludeSwitches": ["enable-automation"],
                 "useAutomationExtension": False,
             },
-            "timeout": 15,
+            "timeout": 20,
             "implicit_wait": 10,
             "page_load_timeout": 30,
             "stealth_mode": True,
@@ -209,7 +209,7 @@ class QidianSpider(BaseSpider):
             return False
 
     # ------------------------------------------------------------------
-    # Small helpers
+    # Utils
     # ------------------------------------------------------------------
     def _today_str(self) -> str:
         """Return today's date string (YYYY-MM-DD)."""
@@ -259,6 +259,166 @@ class QidianSpider(BaseSpider):
         elif unit == "亿":
             val *= 100_000_000
         return int(val)
+
+    def _split_qidian_category(self, raw_category: str) -> Tuple[str, Optional[str]]:
+        """Split '大类·副类' into (main_category, sub_as_tag)."""
+        raw = self._normalize_text(raw_category)
+        if not raw or raw in {"未知", "未知分类"}:
+            return "未知", None
+
+        # 从配置中获取起点主分类列表
+        qidian_main_categories = set(self.site_config.get('novel_types', []))
+
+        # 如果没有配置，使用默认的主分类列表作为后备
+        if not qidian_main_categories:
+            qidian_main_categories = {
+                "玄幻", "奇幻", "武侠", "仙侠", "都市", "现实", "军事", "历史",
+                "游戏", "体育", "科幻", "诸天无限", "悬疑", "轻小说", "短篇"
+            }
+
+        # 子分类到主分类的映射（常见的副分类/题材标签）
+        sub_to_main_map = {
+            # 都市相关
+            "异术超能": "都市",
+            "都市生活": "都市",
+            "都市异能": "都市",
+            "都市修真": "都市",
+            "娱乐明星": "都市",
+            "商战职场": "都市",
+
+            # 玄幻相关
+            "东方玄幻": "玄幻",
+            "高武世界": "玄幻",
+            "异世大陆": "玄幻",
+            "王朝争霸": "玄幻",
+
+            # 仙侠相关
+            "修真文明": "仙侠",
+            "神话修真": "仙侠",
+            "古典仙侠": "仙侠",
+            "现代修真": "仙侠",
+            "幻想修仙": "仙侠",
+
+            # 科幻相关
+            "进化变异": "科幻",
+            "末世危机": "科幻",
+            "时空穿梭": "科幻",
+            "未来世界": "科幻",
+            "星际文明": "科幻",
+            "超级科技": "科幻",
+
+            # 历史相关
+            "历史架空": "历史",
+            "架空历史": "历史",
+            "上古先秦": "历史",
+            "两晋隋唐": "历史",
+            "两宋元明": "历史",
+            "清史民国": "历史",
+            "外国历史": "历史",
+
+            # 军事相关
+            "战争幻想": "军事",
+            "军事战争": "军事",
+            "军旅生涯": "军事",
+
+            # 游戏相关
+            "游戏异界": "游戏",
+            "电子竞技": "游戏",
+            "虚拟网游": "游戏",
+            "游戏系统": "游戏",
+
+            # 体育相关
+            "体育竞技": "体育",
+            "篮球运动": "体育",
+            "足球运动": "体育",
+            "体育赛事": "体育",
+
+            # 悬疑相关
+            "诡秘悬疑": "悬疑",
+            "侦探推理": "悬疑",
+            "奇妙世界": "悬疑",
+
+            # 轻小说相关
+            "原生幻想": "轻小说",
+            "青春日常": "轻小说",
+            "恋爱日常": "轻小说",
+            "搞笑吐槽": "轻小说",
+            "衍生同人": "轻小说",
+
+            # 奇幻相关
+            "史诗奇幻": "奇幻",
+            "现代魔法": "奇幻",
+            "黑暗幻想": "奇幻",
+            "剑与魔法": "奇幻",
+        }
+
+        self.logger.debug(f"[分类解析] 开始解析分类: '{raw}'")
+
+        # 处理有分隔符的情况
+        if "·" in raw:
+            parts = [part.strip() for part in raw.split("·") if part.strip()]
+
+            self.logger.debug(f"[分类解析] 分隔符分割结果: {parts}")
+
+            if len(parts) >= 2:
+                # 尝试识别主分类
+                main_cat = parts[0]
+                sub_cat = "·".join(parts[1:])
+
+                # 检查第一个部分是否为主分类
+                if main_cat in qidian_main_categories:
+                    self.logger.debug(f"[分类解析] 识别到主分类: '{main_cat}'")
+                    return main_cat, sub_cat if sub_cat else None
+                else:
+                    # 检查第一个部分是否是子分类（有映射关系）
+                    if main_cat in sub_to_main_map:
+                        mapped_main = sub_to_main_map[main_cat]
+                        self.logger.debug(f"[分类解析] 通过映射识别主分类: '{main_cat}' -> '{mapped_main}'")
+                        return mapped_main, "·".join(parts)
+                    # 检查是否有其他部分可能是主分类
+                    for i, part in enumerate(parts):
+                        if part in qidian_main_categories:
+                            main_cat = part
+                            sub_cat = "·".join([p for j, p in enumerate(parts) if j != i])
+                            self.logger.debug(f"[分类解析] 在第{i + 1}部分找到主分类: '{main_cat}'")
+                            return main_cat, sub_cat if sub_cat else None
+
+                # 如果没有找到主分类，返回第一个部分作为主分类（可能不正确）
+                self.logger.warning(f"[分类解析] 未识别到主分类，返回第一部分作为主分类: '{main_cat}'")
+                return main_cat, "·".join(parts[1:]) if len(parts) > 1 else None
+            else:
+                # 只有一个部分但有分隔符
+                cleaned = raw.replace("·", "").strip()
+                self.logger.debug(f"[分类解析] 清理后的分类: '{cleaned}'")
+
+                if cleaned in qidian_main_categories:
+                    self.logger.debug(f"[分类解析] 识别为纯主分类: '{cleaned}'")
+                    return cleaned, None
+                elif cleaned in sub_to_main_map:
+                    mapped_main = sub_to_main_map[cleaned]
+                    self.logger.info(f"[分类解析] 通过映射识别主分类: '{cleaned}' -> '{mapped_main}'")
+                    return mapped_main, cleaned
+                else:
+                    self.logger.warning(f"[分类解析] 无法识别的分类: '{cleaned}'")
+                    return "未知", cleaned if cleaned else None
+        else:
+            # 没有分隔符的情况
+            if raw in qidian_main_categories:
+                self.logger.info(f"[分类解析] 识别为纯主分类: '{raw}'")
+                return raw, None
+            elif raw in sub_to_main_map:
+                mapped_main = sub_to_main_map[raw]
+                self.logger.info(f"[分类解析] 通过映射识别主分类: '{raw}' -> '{mapped_main}'")
+                return mapped_main, raw
+            else:
+                # 检查是否包含主分类关键词
+                for main_cat in qidian_main_categories:
+                    if raw.startswith(main_cat) or main_cat in raw:
+                        self.logger.info(f"[分类解析] 文本中包含主分类关键词: '{main_cat}'")
+                        return main_cat, raw.replace(main_cat, "").strip() if raw != main_cat else None
+
+                self.logger.warning(f"[分类解析] 无法识别的分类: '{raw}'")
+                return "未知", raw if raw else None
 
     # ------------------------------------------------------------------
     # Rank type mapping (rank_family / rank_sub_cat)
@@ -331,7 +491,7 @@ class QidianSpider(BaseSpider):
             return None
 
     # ------------------------------------------------------------------
-    # Category normalization (主类 + 副类->tag)
+    # Rank Page Parsing -> novel_id, category, tag
     # ------------------------------------------------------------------
     def _extract_novel_id_from_url(self, url: str) -> str:
         """Extract Qidian novel id (digits) from URL."""
@@ -349,99 +509,6 @@ class QidianSpider(BaseSpider):
             if part.isdigit() and len(part) >= 6:
                 return part
         return ""
-
-    def _split_qidian_category(self, raw_category: str) -> Tuple[str, Optional[str]]:
-        """Split '大类·副类' into (main_category, sub_as_tag)."""
-        raw = self._normalize_text(raw_category)
-        if not raw or raw in {"未知", "未知分类"}:
-            return "未知", None
-
-        # 从配置中获取起点主分类列表
-        qidian_main_categories = set(self.site_config.get('novel_types', []))
-
-        # 如果没有配置，使用默认的主分类列表作为后备
-        if not qidian_main_categories:
-            qidian_main_categories = {
-                "玄幻", "奇幻", "武侠", "仙侠", "都市", "现实", "军事", "历史",
-                "游戏", "体育", "科幻", "诸天无限", "悬疑", "轻小说", "短篇"
-            }
-
-        # 常见的副分类/标签列表（用于识别）
-        common_sub_categories = {
-            "修真文明", "异术超能", "东方玄幻", "高武世界", "都市异能",
-            "都市生活", "进化变异", "末世危机", "时空穿梭", "未来世界",
-            "历史架空", "架空历史", "上古先秦", "两晋隋唐", "两宋元明",
-            "清史民国", "外国历史", "战争幻想", "军事战争", "军旅生涯",
-            "游戏异界", "电子竞技", "虚拟网游", "游戏系统", "体育竞技",
-            "篮球运动", "足球运动", "体育赛事", "古武机甲", "星际文明",
-            "超级科技", "时空穿梭", "诡秘悬疑", "侦探推理", "奇妙世界",
-            "原生幻想", "青春日常", "恋爱日常", "搞笑吐槽", "衍生同人",
-            "史诗奇幻", "现代魔法", "黑暗幻想", "剑与魔法", "现代修真",
-            "古典仙侠", "神话修真", "现代修仙", "历史神话", "国术无双"
-        }
-
-        # 处理有分隔符的情况
-        if "·" in raw:
-            parts = [part.strip() for part in raw.split("·") if part.strip()]
-
-            if len(parts) >= 2:
-                # 尝试识别主分类（通常在第一个位置）
-                main_cat_candidate = parts[0]
-                sub_cat_candidate = parts[1] if len(parts) > 1 else ""
-
-                # 如果第一个部分是主分类
-                if main_cat_candidate in qidian_main_categories:
-                    main_cat = main_cat_candidate
-                    sub_cat = "·".join(parts[1:]) if len(parts) > 1 else None
-                else:
-                    # 检查第二个部分是否可能是主分类
-                    if len(parts) > 1 and parts[1] in qidian_main_categories:
-                        main_cat = parts[1]
-                        sub_cat = parts[0] if len(parts[0]) > 0 else None
-                        # 如果还有其他部分，也加入到副分类
-                        if len(parts) > 2:
-                            sub_cat = sub_cat + "·" + "·".join(parts[2:]) if sub_cat else "·".join(parts[2:])
-                    else:
-                        # 都不是主分类，可能是副分类的组合
-                        # 检查是否有部分匹配主分类
-                        main_cat = "未知"
-                        for part in parts:
-                            if part in qidian_main_categories:
-                                main_cat = part
-                                break
-
-                        # 剩余部分作为副分类
-                        remaining_parts = [p for p in parts if p != main_cat]
-                        sub_cat = "·".join(remaining_parts) if remaining_parts else None
-
-                # 如果副分类是空字符串，设为None
-                if sub_cat and len(sub_cat) == 0:
-                    sub_cat = None
-
-                return main_cat, sub_cat
-            else:
-                # 只有一个部分但有分隔符
-                cleaned = raw.replace("·", "").strip()
-                if cleaned in qidian_main_categories:
-                    return cleaned, None
-                else:
-                    return "未知", cleaned if cleaned else None
-        else:
-            # 没有分隔符的情况
-            if raw in qidian_main_categories:
-                return raw, None
-            elif raw in common_sub_categories:
-                # 如果是常见的副分类，则主分类设为未知
-                return "未知", raw
-            else:
-                # 检查是否可能是主分类的变体或别名
-                for main_cat in qidian_main_categories:
-                    if raw.startswith(main_cat) or main_cat.startswith(raw):
-                        if len(raw) <= 4:  # 避免错误匹配长文本
-                            return main_cat, None
-
-                # 无法识别，设为未知
-                return "未知", raw if raw else None
 
     def _parse_rank_page(self, soup: BeautifulSoup, *, rank_type: str, page: int) -> List[Dict[str, Any]]:
         """Parse one rank page soup into raw rank items."""
@@ -633,6 +700,9 @@ class QidianSpider(BaseSpider):
 
         return all_items
 
+    # ------------------------------------------------------------------
+    # Detail Page -> title, author, intro, status, total_recommend
+    # ------------------------------------------------------------------
     def _fill_detail_title_author_intro(self, soup: BeautifulSoup, detail: Dict[str, Any]) -> None:
         """Fill title/author/intro fields from detail page soup."""
         # 只有在这些字段为空时才填充
@@ -669,35 +739,187 @@ class QidianSpider(BaseSpider):
                 else:
                     detail["intro"] = self._normalize_text(intro_elem.get_text(strip=True))
 
+    def _extract_category_from_detail(self, soup: BeautifulSoup) -> str:
+        """从详情页提取完整的分类信息（主分类·子分类）"""
+        try:
+            self.logger.info("开始提取分类信息...")
+
+            # 方法1：优先从 book-attribute 中提取分类信息
+            # 根据HTML结构：<p class="book-attribute"> ... <a>都市</a><span class="dot">·</span><a>异术超能</a> ...
+            book_attribute = soup.select_one('.book-attribute')
+
+            if book_attribute:
+                self.logger.debug(f"找到book-attribute元素: {book_attribute.prettify()[:500]}")
+
+                # 查找所有的a标签（分类链接）
+                category_links = []
+                for link in book_attribute.find_all('a', href=True):
+                    link_text = self._normalize_text(link.get_text(strip=True))
+                    link_href = link.get('href', '')
+                    link_title = link.get('title', '')
+
+                    # 过滤掉非分类链接（可能包含其他信息）
+                    # 分类链接通常有特定的href模式或title
+                    if link_text and (link_href and ('chanId' in link_href or link_href.endswith('//'))):
+                        # 检查是否可能是分类
+                        if any(keyword in link_title for keyword in ['小说', '作品']):
+                            category_links.append((link_text, link_title))
+                        else:
+                            # 如果title没有关键词，但文本长度合适，也可能是分类
+                            if len(link_text) <= 4:  # 主分类通常1-2个字
+                                category_links.append((link_text, link_title))
+                            elif len(link_text) <= 8:  # 子分类可能稍长
+                                category_links.append((link_text, link_title))
+
+                self.logger.debug(f"从book-attribute找到的分类链接: {category_links}")
+
+                if len(category_links) >= 2:
+                    # 尝试组合主分类和子分类
+                    main_cat = category_links[0][0]
+                    sub_cat = category_links[1][0]
+
+                    # 确保不是重复的
+                    if main_cat != sub_cat:
+                        result = f"{main_cat}·{sub_cat}"
+                        self.logger.info(f"从book-attribute组合分类: '{result}'")
+                        return result
+                elif len(category_links) == 1:
+                    result = category_links[0][0]
+                    self.logger.info(f"从book-attribute提取单一分类: '{result}'")
+                    return result
+
+            # 方法2：使用正则表达式查找 book-attribute 中的分类模式
+            if book_attribute:
+                # 提取所有文本，包括分隔符
+                full_text = self._normalize_text(book_attribute.get_text(" ", strip=True))
+                self.logger.debug(f"book-attribute完整文本: '{full_text}'")
+
+                # 尝试匹配 "都市 · 异术超能" 这种模式
+                # 使用正则表达式查找可能的分类组合
+                import re
+                pattern = r'([\u4e00-\u9fff]{1,4})\s*[·•]\s*([\u4e00-\u9fff]{2,8})'
+                match = re.search(pattern, full_text)
+
+                if match:
+                    main_cat = match.group(1)
+                    sub_cat = match.group(2)
+                    result = f"{main_cat}·{sub_cat}"
+                    self.logger.info(f"通过正则匹配分类: '{result}'")
+                    return result
+
+                # 如果正则没匹配到，尝试查找所有中文字符段
+                chinese_parts = re.findall(r'[\u4e00-\u9fff]+', full_text)
+                self.logger.debug(f"中文部分: {chinese_parts}")
+
+                # 过滤掉常见非分类词汇
+                exclude_words = ['连载', '签约', 'VIP', '完本', '上架', '免费']
+                category_candidates = [part for part in chinese_parts if part not in exclude_words]
+
+                if len(category_candidates) >= 2:
+                    main_cat = category_candidates[0]
+                    sub_cat = category_candidates[1]
+                    if main_cat != sub_cat:
+                        result = f"{main_cat}·{sub_cat}"
+                        self.logger.info(f"从文本中提取分类组合: '{result}'")
+                        return result
+                elif category_candidates:
+                    result = category_candidates[0]
+                    self.logger.info(f"从文本中提取单一分类: '{result}'")
+                    return result
+
+            # 方法3：从 meta 标签提取（备用方案）
+            meta_category = soup.select_one('meta[property="og:novel:category"]')
+            if meta_category and meta_category.get('content'):
+                category = meta_category.get('content')
+                self.logger.info(f"从meta标签提取分类: '{category}'")
+                return category
+
+            # 方法4：尝试从面包屑导航提取
+            breadcrumb_selectors = [
+                '.crumb a', '.bread-crumb a', '.site-nav a',
+                '.nav-bar a', '.breadcrumb a', '.path a',
+                '.book-nav a', '.nav a[href*="qidian.com/"]'
+            ]
+
+            for selector in breadcrumb_selectors:
+                breadcrumb_links = soup.select(selector)
+                if len(breadcrumb_links) >= 2:
+                    # 获取所有链接文本
+                    link_texts = [self._normalize_text(link.get_text(strip=True)) for link in breadcrumb_links]
+                    # 过滤掉非分类文本
+                    exclude = ['首页', '我的书架', '排行榜', '书库', '小说', '起点中文网', '起点', '搜索',
+                               '全部作品', '作品', '目录', '正文', '最新章节', '加入书架']
+                    category_candidates = [text for text in link_texts if text and text not in exclude]
+
+                    if category_candidates:
+                        # 通常最后一个或倒数第二个是分类
+                        for i in range(len(category_candidates) - 1, -1, -1):
+                            cat = category_candidates[i]
+                            if len(cat) <= 4:  # 主分类通常较短
+                                # 尝试与下一个候选组合
+                                if i + 1 < len(category_candidates):
+                                    next_cat = category_candidates[i + 1]
+                                    if len(next_cat) <= 6:  # 子分类通常也较短
+                                        result = f"{cat}·{next_cat}"
+                                        self.logger.info(f"从面包屑组合分类: '{result}'")
+                                        return result
+                                return cat
+
+            self.logger.warning("未能提取分类信息，返回'未知'")
+            return "未知"
+
+        except Exception as e:
+            self.logger.error(f"提取分类失败: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return "未知"
+
     def _fill_detail_category_tags(self, soup: BeautifulSoup, detail: Dict[str, Any]) -> None:
         """Fill main_category and tags from detail page soup - 只有在没有分类信息时才填充"""
         # 如果已经有主分类且不是"未知"，则跳过详情页分类提取
-        if detail.get("main_category") and detail.get("main_category") != "未知":
-            self.logger.info(f"使用榜单页分类信息: main='{detail.get('main_category')}', tags={detail.get('tags', [])}")
+        current_main = detail.get("main_category", "")
+        current_tags = detail.get("tags", [])
+
+        if current_main and current_main != "未知":
+            self.logger.info(f"[分类处理] 已有分类信息，跳过提取 - main='{current_main}', tags={current_tags}")
             return
 
+        self.logger.info(f"[分类处理] 开始处理分类信息...")
         raw_cat = self._extract_category_from_detail(soup)
         main_cat, sub_tag = self._split_qidian_category(raw_cat)
 
+        self.logger.info(f"[分类处理] 解析结果 - 原始: '{raw_cat}', 主分类: '{main_cat}', 副分类: '{sub_tag}'")
+
+        # 更新主分类
         detail["main_category"] = main_cat
 
         # 合并标签：已有的标签加上新提取的副分类（如果存在）
         tags = detail.get("tags", [])
+
         if sub_tag and sub_tag not in tags:
+            self.logger.info(f"[分类处理] 添加副分类作为标签: '{sub_tag}'")
             tags.append(sub_tag)
 
         # 从详情页提取的标签
+        tag_count = 0
         for sel in [".tag-wrap a", ".tags a", ".book-tag a", ".tag-list a", ".book-tags a"]:
             for el in soup.select(sel):
                 t = self._normalize_text(el.get_text(strip=True))
                 if t and t not in tags:
                     # 过滤掉可能是主分类的标签和常见非标签文本
-                    if (t != main_cat and
-                            t not in ['VIP', '签约', '完结', '连载', '上架', '免费', '热门', '推荐']):
+                    exclude_words = ['VIP', '签约', '完结', '连载', '上架', '免费', '热门', '推荐']
+                    if (t != main_cat and t not in exclude_words):
+                        self.logger.debug(f"[分类处理] 发现标签: '{t}'")
                         tags.append(t)
+                        tag_count += 1
+
+        # 确保主分类不作为标签
+        if main_cat in tags:
+            self.logger.info(f"[分类处理] 从标签中移除主分类: '{main_cat}'")
+            tags.remove(main_cat)
 
         detail["tags"] = self._dedupe_keep_order(tags)
-        self.logger.info(f"最终分类: main='{main_cat}', tags={tags}")
+        self.logger.info(f"[分类处理] 最终结果 - main='{detail['main_category']}', tags={tags} (新增{tag_count}个标签)")
 
     def _fill_detail_status_words(self, soup: BeautifulSoup, detail: Dict[str, Any], page_url: str = "") -> None:
         """Fill normalized status (ongoing/completed) and total_words from detail page."""
@@ -714,21 +936,21 @@ class QidianSpider(BaseSpider):
                     self.logger.debug(f"Found status text in span: '{status_text}'")
 
                     if status_text == "连载":
-                        detail["status"] = "ongoing"
+                        detail["status"] = "连载"
                     elif status_text == "完本":
-                        detail["status"] = "completed"
+                        detail["status"] = "完本"
                     elif "连载" in status_text:
-                        detail["status"] = "ongoing"
+                        detail["status"] = "连载"
                     elif "完本" in status_text or "完结" in status_text:
-                        detail["status"] = "completed"
+                        detail["status"] = "完本"
 
             # 如果通过span没有找到状态，回退到正则搜索整个页面
             if not detail.get("status"):
                 page_text = self._normalize_text(soup.get_text(" ", strip=True))
                 if re.search(r"\b完本\b|\b完结\b", page_text):
-                    detail["status"] = "completed"
+                    detail["status"] = "完本"
                 elif re.search(r"\b连载\b", page_text):
-                    detail["status"] = "ongoing"
+                    detail["status"] = "连载"
 
             # 提取字数信息
             word_count = None
@@ -764,12 +986,12 @@ class QidianSpider(BaseSpider):
 
             if word_count is not None:
                 detail["total_words"] = word_count
-                self.logger.debug(f"Extracted word count: {word_count}")
+                self.logger.debug(f"Extracted 小说总字数: {word_count}")
             else:
                 self.logger.warning("Could not extract word count from page")
 
             # 记录提取结果
-            self.logger.info(f"Extracted status: '{detail.get('status')}', word count: {detail.get('total_words')}")
+            self.logger.info(f"小说状态: '{detail.get('status')}', 小说总字数: {detail.get('total_words')}")
 
         except Exception as e:
             self.logger.error(f"Error extracting status and word count from page: {e}")
@@ -1044,284 +1266,10 @@ class QidianSpider(BaseSpider):
             self.book_cache[pid] = detail
         return detail
 
-    def _extract_category_from_detail(self, soup: BeautifulSoup) -> str:
-        """Extract raw category string from detail page with improved selectors."""
-        try:
-            # 方法1: 从meta标签提取
-            meta_category = soup.select_one('meta[property="og:novel:category"]')
-            if meta_category and meta_category.get('content'):
-                category = meta_category.get('content')
-                self.logger.info(f"从meta标签提取分类: {category}")
-                return category
-
-            # 方法2: 从面包屑导航提取
-            breadcrumb_selectors = [
-                '.crumb a', '.bread-crumb a', '.site-nav a',
-                '.nav-bar a', '.breadcrumb a', '.path a',
-                '.book-nav a', '.nav a[href*="qidian.com/"]'
-            ]
-
-            for selector in breadcrumb_selectors:
-                breadcrumb_links = soup.select(selector)
-                if len(breadcrumb_links) >= 2:
-                    # 获取所有链接文本
-                    link_texts = [self._normalize_text(link.get_text(strip=True)) for link in breadcrumb_links]
-                    # 过滤掉非分类文本
-                    exclude = ['首页', '我的书架', '排行榜', '书库', '小说', '起点中文网', '起点', '搜索',
-                               '全部作品', '作品', '目录', '正文', '最新章节', '加入书架']
-                    category_candidates = [text for text in link_texts if text and text not in exclude]
-
-                    self.logger.debug(f"面包屑候选分类: {category_candidates}")
-
-                    if len(category_candidates) >= 2:
-                        # 通常倒数第二个是主分类，最后一个是副分类
-                        for i in range(len(category_candidates) - 1, 0, -1):
-                            main_cat = category_candidates[i - 1]
-                            sub_cat = category_candidates[i]
-                            if main_cat != sub_cat and len(main_cat) <= 4 and len(sub_cat) <= 6:
-                                result = f"{main_cat}·{sub_cat}"
-                                self.logger.info(f"从面包屑提取分类: {result}")
-                                return result
-                        # 如果没找到合适的组合，返回最后一个候选
-                        if category_candidates:
-                            self.logger.info(f"从面包屑返回最后一个候选: {category_candidates[-1]}")
-                            return category_candidates[-1]
-
-            # 方法3: 从小说标签区域提取
-            tag_selectors = [
-                '.book-info-detail .tag', '.book-information .tag',
-                '.book-info .tag', '.book-tag', '.tags a',
-                '.tag-wrap a', '.book-tags a', '.tag-list a'
-            ]
-
-            for selector in tag_selectors:
-                tag_elements = soup.select(selector)
-                category_tags = []
-                for tag in tag_elements:
-                    text = self._normalize_text(tag.get_text(strip=True))
-                    href = tag.get('href', '')
-
-                    # 常见的主分类列表
-                    main_categories = ["玄幻", "奇幻", "武侠", "仙侠", "都市", "现实",
-                                       "军事", "历史", "游戏", "体育", "科幻", "诸天无限",
-                                       "悬疑", "轻小说", "短篇"]
-
-                    # 检查是否是主分类
-                    for cat in main_categories:
-                        if cat in text:
-                            category_tags.append(cat)
-                            break
-                    else:
-                        # 如果不是主分类，检查长度和排除常见非分类文本
-                        if (text and len(text) <= 8 and
-                                text not in ['VIP', '签约', '完结', '连载', '上架', '免费', '热门', '推荐']):
-                            category_tags.append(text)
-
-                if category_tags:
-                    # 去重
-                    unique_tags = []
-                    seen = set()
-                    for tag in category_tags:
-                        if tag not in seen:
-                            seen.add(tag)
-                            unique_tags.append(tag)
-
-                    if len(unique_tags) >= 2:
-                        result = f"{unique_tags[0]}·{unique_tags[1]}"
-                        self.logger.info(f"从标签区域提取分类: {result}")
-                        return result
-                    elif unique_tags:
-                        result = unique_tags[0]
-                        self.logger.info(f"从标签区域提取分类: {result}")
-                        return result
-
-            # 方法4: 从页面URL或特殊属性中提取
-            # 查找可能有data-category属性的元素
-            for elem in soup.select('[data-category], [data-type], [data-cate]'):
-                cat = elem.get('data-category') or elem.get('data-type') or elem.get('data-cate')
-                if cat:
-                    self.logger.info(f"从data属性提取分类: {cat}")
-                    return cat
-
-            # 方法5: 从页面标题或关键词中提取
-            title_elem = soup.select_one('title')
-            if title_elem:
-                title_text = title_elem.get_text(strip=True)
-                # 常见分类关键词
-                common_categories = ['玄幻', '奇幻', '武侠', '仙侠', '都市', '现实',
-                                     '军事', '历史', '游戏', '体育', '科幻', '悬疑',
-                                     '轻小说', '二次元', '古代言情', '现代言情']
-                for cat in common_categories:
-                    if cat in title_text:
-                        self.logger.info(f"从标题提取分类: {cat}")
-                        return cat
-
-            # 方法6: 从页面文本中搜索
-            page_text = self._normalize_text(soup.get_text(" ", strip=True))
-            for cat in ['玄幻', '奇幻', '武侠', '仙侠', '都市', '现实',
-                        '军事', '历史', '游戏', '体育', '科幻', '悬疑']:
-                if cat in page_text:
-                    # 检查是否在小说标题中（避免误判）
-                    title_elem = soup.select_one('h1, .book-title')
-                    if title_elem:
-                        title_text = title_elem.get_text(strip=True)
-                        if cat not in title_text or page_text.count(cat) > 1:
-                            self.logger.info(f"从页面文本提取分类: {cat}")
-                            return cat
-
-            self.logger.warning("未能提取分类信息，返回'未知'")
-            return "未知"
-
-        except Exception as e:
-            self.logger.error(f"提取分类失败: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
-            return "未知"
-
-    def _extract_first_upload_date(self, soup: BeautifulSoup, detail: Dict[str, Any]) -> None:
-        """从详情页提取上架时间（首发时间）"""
-        try:
-            self.logger.debug("开始提取上架时间...")
-
-            # 方法0：直接查找新的HTML结构（针对你提供的HTML示例）
-            # 查找所有包含"上架"文本的元素
-            upload_elements = soup.find_all(string=re.compile(r'上架'))
-
-            for upload_text in upload_elements:
-                # 获取包含"上架"的元素
-                upload_elem = upload_text.parent
-                if upload_elem:
-                    self.logger.debug(f"找到'上架'元素: {upload_elem}")
-
-                    # 查找前一个兄弟元素（应该是日期元素）
-                    prev_sibling = upload_elem.previous_sibling
-
-                    # 可能需要跳过空白节点
-                    while prev_sibling and not isinstance(prev_sibling, str) and getattr(prev_sibling, 'name',
-                                                                                         None) is None:
-                        prev_sibling = prev_sibling.previous_sibling
-
-                    if prev_sibling and hasattr(prev_sibling, 'get_text'):
-                        # 检查前一个元素是否包含日期
-                        date_text = self._normalize_text(prev_sibling.get_text(strip=True))
-                        self.logger.debug(f"前一个兄弟元素文本: {date_text}")
-
-                        # 尝试解析日期格式
-                        date_patterns = [
-                            r'(\d{4})年(\d{1,2})月(\d{1,2})日',
-                            r'(\d{4})-(\d{1,2})-(\d{1,2})',
-                            r'(\d{4})\.(\d{1,2})\.(\d{1,2})',
-                            r'(\d{4})/(\d{1,2})/(\d{1,2})'
-                        ]
-
-                        for pattern in date_patterns:
-                            date_match = re.search(pattern, date_text)
-                            if date_match:
-                                year = date_match.group(1)
-                                month = date_match.group(2).zfill(2)
-                                day = date_match.group(3).zfill(2)
-                                first_upload_date = f"{year}-{month}-{day}"
-                                detail["first_upload_date"] = first_upload_date
-                                self.logger.info(f"从新结构提取上架时间: {first_upload_date}")
-                                return
-
-            # 方法1：查找包含"上架"文本的元素（原始方法）
-            upload_elements = soup.find_all(string=re.compile(r'上架|首发时间'))
-
-            for upload_text in upload_elements:
-                parent = upload_text.parent
-                if parent:
-                    # 获取父元素的所有文本
-                    parent_text = self._normalize_text(parent.get_text(" ", strip=True))
-                    self.logger.debug(f"找到上架相关信息: {parent_text[:100]}")
-
-                    # 尝试解析日期格式
-                    date_patterns = [
-                        r'(\d{4})年(\d{1,2})月(\d{1,2})日',
-                        r'(\d{4})-(\d{1,2})-(\d{1,2})',
-                        r'(\d{4})\.(\d{1,2})\.(\d{1,2})',
-                        r'(\d{4})/(\d{1,2})/(\d{1,2})'
-                    ]
-
-                    for pattern in date_patterns:
-                        date_match = re.search(pattern, parent_text)
-                        if date_match:
-                            year = date_match.group(1)
-                            month = date_match.group(2).zfill(2)
-                            day = date_match.group(3).zfill(2)
-                            first_upload_date = f"{year}-{month}-{day}"
-                            detail["first_upload_date"] = first_upload_date
-                            self.logger.info(f"从文本提取上架时间: {first_upload_date}")
-                            return
-
-            # 方法2：查找meta标签
-            meta_date = soup.select_one('meta[property="og:novel:update_time"]') or \
-                        soup.select_one('meta[property="og:novel:create_time"]')
-            if meta_date and meta_date.get('content'):
-                date_str = meta_date.get('content')
-                # 尝试解析各种日期格式
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                    first_upload_date = dt.strftime("%Y-%m-%d")
-                    detail["first_upload_date"] = first_upload_date
-                    self.logger.info(f"从meta标签提取上架时间: {first_upload_date}")
-                    return
-                except:
-                    pass
-
-            # 方法3：查找页面中的时间元素
-            time_elements = soup.select('time, .time, .date, .publish-date')
-            for time_elem in time_elements:
-                time_text = self._normalize_text(time_elem.get_text(strip=True))
-                if time_text and ('上架' in time_text or '首发' in time_text):
-                    for pattern in [r'(\d{4})年(\d{1,2})月(\d{1,2})日', r'(\d{4})-(\d{1,2})-(\d{1,2})']:
-                        date_match = re.search(pattern, time_text)
-                        if date_match:
-                            year = date_match.group(1)
-                            month = date_match.group(2).zfill(2)
-                            day = date_match.group(3).zfill(2)
-                            first_upload_date = f"{year}-{month}-{day}"
-                            detail["first_upload_date"] = first_upload_date
-                            self.logger.info(f"从时间元素提取上架时间: {first_upload_date}")
-                            return
-
-            # 方法4：查找特定的CSS类（针对新的起点页面结构）
-            # 查找包含"上架"文本的元素，然后查找其附近包含日期格式的元素
-            for elem in soup.select('.text-c12.text-s-gray-500.mt-4px'):
-                if '上架' in elem.get_text(strip=True):
-                    # 查找前一个兄弟元素
-                    prev_sibling = elem.previous_sibling
-                    while prev_sibling and (not hasattr(prev_sibling, 'get_text') or
-                                            not self._normalize_text(prev_sibling.get_text(strip=True))):
-                        prev_sibling = prev_sibling.previous_sibling
-
-                    if prev_sibling and hasattr(prev_sibling, 'get_text'):
-                        date_text = self._normalize_text(prev_sibling.get_text(strip=True))
-                        # 尝试解析日期
-                        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', date_text)
-                        if date_match:
-                            year = date_match.group(1)
-                            month = date_match.group(2).zfill(2)
-                            day = date_match.group(3).zfill(2)
-                            first_upload_date = f"{year}-{month}-{day}"
-                            detail["first_upload_date"] = first_upload_date
-                            self.logger.info(f"从CSS类提取上架时间: {first_upload_date}")
-                            return
-
-            self.logger.debug("未能在详情页提取到上架时间，将使用空值")
-            detail["first_upload_date"] = ""
-
-        except Exception as e:
-            self.logger.error(f"提取上架时间失败: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
-            detail["first_upload_date"] = ""
-
     # ------------------------------------------------------------------
-    # Chapters (FIRST_N_CHAPTERS)
+    # Chapter Page -> FIRST_N_CHAPTERS, each w/ content, word count, publish date
     # ------------------------------------------------------------------
-
+    # 在 _extract_chapter_links 方法中，我们需要从章节链接的title属性中提取发布时间
     def _extract_chapter_links(self, soup: BeautifulSoup, book_id: str) -> List[Tuple[str, str, str, int]]:
         """从目录页面提取章节链接"""
         chapter_links = []
@@ -1396,8 +1344,9 @@ class QidianSpider(BaseSpider):
                         href = chapter_link.get('href', '')
                         link_text = chapter_link.text.strip()  # 可能包含章节名和其他信息
 
-                        # 提取title属性中的信息
+                        # 提取title属性中的信息 - 这是关键，包含发布时间
                         title_attr = chapter_link.get('title', '')
+                        self.logger.debug(f'章节链接title属性: {title_attr}')
 
                         # 如果没有href，尝试其他方式
                         if not href:
@@ -1415,19 +1364,47 @@ class QidianSpider(BaseSpider):
                             word_count = 0
                             chapter_name = link_text
 
+                            # 详细解析title属性，通常格式为："首发时间：2022-10-06 字数：2039 章节名：第一章 初入"
                             if title_attr:
-                                # title_attr格式可能为："首发时间：2023-01-01 字数：3000 章节名：第一章"
-                                import re
-                                time_match = re.search(r'首发时间[：:]?\s*(\d{4}-\d{2}-\d{2})', title_attr)
-                                word_match = re.search(r'字数[：:]?\s*(\d+)', title_attr)
-                                chapter_match = re.search(r'章节名[：:]?\s*(.+)', title_attr)
+                                # 使用正则表达式提取各个部分
+                                time_patterns = [
+                                    r'首发时间[：:]?\s*(\d{4}-\d{2}-\d{2})',
+                                    r'更新时间[：:]?\s*(\d{4}-\d{2}-\d{2})',
+                                    r'发表时间[：:]?\s*(\d{4}-\d{2}-\d{2})'
+                                ]
 
-                                if time_match:
-                                    first_post_time = time_match.group(1)
-                                if word_match:
-                                    word_count = int(word_match.group(1))
-                                if chapter_match:
-                                    chapter_name = chapter_match.group(1)
+                                for pattern in time_patterns:
+                                    time_match = re.search(pattern, title_attr)
+                                    if time_match:
+                                        first_post_time = time_match.group(1)
+                                        self.logger.debug(f'从title属性提取到发布时间: {first_post_time}')
+                                        break
+
+                                # 提取字数
+                                word_patterns = [
+                                    r'字数[：:]?\s*(\d+)',
+                                    r'(\d+)字'
+                                ]
+
+                                for pattern in word_patterns:
+                                    word_match = re.search(pattern, title_attr)
+                                    if word_match:
+                                        word_count = int(word_match.group(1))
+                                        self.logger.debug(f'从title属性提取到字数: {word_count}')
+                                        break
+
+                                # 提取章节名
+                                chapter_patterns = [
+                                    r'章节名[：:]?\s*(.+)',
+                                    r'章节标题[：:]?\s*(.+)'
+                                ]
+
+                                for pattern in chapter_patterns:
+                                    chapter_match = re.search(pattern, title_attr)
+                                    if chapter_match:
+                                        chapter_name = chapter_match.group(1).strip()
+                                        self.logger.debug(f'从title属性提取到章节名: {chapter_name}')
+                                        break
 
                             # 如果没有从title属性提取到章节名，使用link_text
                             if not chapter_name or chapter_name == link_text:
@@ -1452,14 +1429,10 @@ class QidianSpider(BaseSpider):
                                     # 使用默认字数
                                     word_count = 3000
 
-                            # 如果没有提取到发布时间，使用上架时间或当前日期
-                            if not first_post_time:
-                                first_post_time = ""
-
                             chapter_links.append((
                                 chapter_name,
                                 chapter_url,
-                                first_post_time,
+                                first_post_time,  # 这里应该正确传递提取的发布时间
                                 word_count
                             ))
 
@@ -1495,8 +1468,8 @@ class QidianSpider(BaseSpider):
                                 # 处理相对URL
                                 chapter_url = self._to_abs_url(href)
 
-                                # 尝试从href中提取章节信息
-                                match = re.search(r'/chapter/\d+/(\d+)/', href)
+                                # 提取title属性
+                                title_attr = link.get('title', '')
 
                                 # 如果没有章节名，使用link_text
                                 if link_text:
@@ -1506,16 +1479,22 @@ class QidianSpider(BaseSpider):
 
                                 # 提取字数
                                 word_count = 0
-                                word_match = re.search(r'(\d+)字', link_text)
-                                if word_match:
-                                    word_count = int(word_match.group(1))
-                                else:
-                                    word_count = 3000  # 默认值
+                                if title_attr:
+                                    word_match = re.search(r'字数[：:]?\s*(\d+)', title_attr)
+                                    if word_match:
+                                        word_count = int(word_match.group(1))
+
+                                # 提取发布时间
+                                first_post_time = ""
+                                if title_attr:
+                                    time_match = re.search(r'首发时间[：:]?\s*(\d{4}-\d{2}-\d{2})', title_attr)
+                                    if time_match:
+                                        first_post_time = time_match.group(1)
 
                                 chapter_links.append((
                                     chapter_name,
                                     chapter_url,
-                                    "",  # 发布时间
+                                    first_post_time,  # 这里传递发布时间
                                     word_count
                                 ))
 
@@ -1622,6 +1601,205 @@ class QidianSpider(BaseSpider):
             self.logger.error(f'提取章节内容失败: {e}')
             return None
 
+    def _extract_publish_date_from_chapter(self, soup: BeautifulSoup) -> Optional[str]:
+        """从章节页面提取发布时间"""
+        try:
+            # 方法1：查找包含发布时间信息的元素
+            # 常见的选择器
+            selectors = [
+                '.chapter-update', '.update-time', '.publish-time',
+                '.chapter-info', '.info', '.chapter-meta',
+                '.time', '.date', '.chapter-date'
+            ]
+
+            for selector in selectors:
+                elements = soup.select(selector)
+                for elem in elements:
+                    text = self._normalize_text(elem.get_text(strip=True))
+                    if text:
+                        # 尝试提取日期
+                        date_match = re.search(r'(\d{4})[年.-](\d{1,2})[月.-](\d{1,2})[日]?', text)
+                        if date_match:
+                            year = date_match.group(1)
+                            month = date_match.group(2).zfill(2)
+                            day = date_match.group(3).zfill(2) if date_match.group(3) else "01"
+                            return f"{year}-{month}-{day}"
+
+            # 方法2：在页面文本中搜索日期
+            page_text = self._normalize_text(soup.get_text(" ", strip=True))
+
+            # 常见的关键词
+            keywords = ['首发', '发布', '更新', '发表', '上架']
+            for keyword in keywords:
+                # 找到关键词的位置
+                idx = page_text.find(keyword)
+                if idx != -1:
+                    # 提取关键词周围的文本
+                    start = max(0, idx - 50)
+                    end = min(len(page_text), idx + 50)
+                    context = page_text[start:end]
+
+                    # 在上下文中搜索日期
+                    date_patterns = [
+                        r'(\d{4})[年.-](\d{1,2})[月.-](\d{1,2})[日]?',
+                        r'(\d{4})-(\d{1,2})-(\d{1,2})',
+                        r'(\d{4})\.(\d{1,2})\.(\d{1,2})',
+                    ]
+
+                    for pattern in date_patterns:
+                        date_match = re.search(pattern, context)
+                        if date_match:
+                            groups = date_match.groups()
+                            if len(groups) >= 3:
+                                year = groups[0]
+                                month = groups[1].zfill(2)
+                                day = groups[2].zfill(2) if groups[2] else "01"
+                                return f"{year}-{month}-{day}"
+
+            # 方法3：查找所有可能包含日期的元素
+            all_elements = soup.find_all(string=re.compile(r'\d{4}[年.-]\d{1,2}[月.-]\d{1,2}'))
+            for text in all_elements:
+                if isinstance(text, str):
+                    date_match = re.search(r'(\d{4})[年.-](\d{1,2})[月.-](\d{1,2})[日]?', text)
+                    if date_match:
+                        year = date_match.group(1)
+                        month = date_match.group(2).zfill(2)
+                        day = date_match.group(3).zfill(2) if date_match.group(3) else "01"
+                        # 检查是否是合理的日期（排除页码等）
+                        if int(year) > 2000 and int(year) < 2100:
+                            return f"{year}-{month}-{day}"
+
+            return None
+
+        except Exception as e:
+            self.logger.error(f"从章节页面提取发布时间失败: {e}")
+            return None
+
+    def _extract_first_upload_date(self, soup: BeautifulSoup, detail: Dict[str, Any]) -> None:
+        """从第一个获取的章节正文页中提取上架时间（首发时间）
+
+        修改逻辑：不再从详情页提取，而是从章节页面中提取
+        """
+        try:
+            self.logger.debug("开始提取上架时间（从章节页面）...")
+
+            # 首先从URL中提取小说ID
+            novel_id = detail.get("platform_novel_id", "")
+            if not novel_id:
+                self.logger.warning("没有小说ID，无法获取章节")
+                detail["first_upload_date"] = ""
+                return
+
+            # 构建目录页面URL
+            catalog_url = f'https://book.qidian.com/info/{novel_id}/#Catalog'
+            self.logger.info(f'访问目录页以获取第一章: {catalog_url}')
+
+            # 访问目录页面
+            catalog_soup = self._get_soup(
+                catalog_url,
+                wait_css="div.catalog-all, div.catalog-volume, ul.volume-chapters",
+                wait_sec=15,
+            )
+
+            if not catalog_soup:
+                self.logger.warning("无法访问目录页")
+                detail["first_upload_date"] = ""
+                return
+
+            # 提取章节链接
+            chapter_infos = self._extract_chapter_links(catalog_soup, novel_id)
+
+            if not chapter_infos:
+                self.logger.warning("未找到章节链接")
+                detail["first_upload_date"] = ""
+                return
+
+            # 获取第一章的URL
+            if len(chapter_infos) > 0:
+                first_chapter_info = chapter_infos[0]
+                chapter_url = first_chapter_info[1]  # 第二个元素是URL
+
+                self.logger.info(f"获取第一章以提取上架时间: {chapter_url}")
+
+                # 访问第一章页面
+                chapter_soup = self._get_soup(
+                    chapter_url,
+                    wait_css="div.reader-content .content-text, div.chapter-wrapper .content-text",
+                    wait_sec=15,
+                )
+
+                if not chapter_soup:
+                    self.logger.warning("无法访问第一章页面")
+                    detail["first_upload_date"] = ""
+                    return
+
+                # 从章节页面提取发布时间
+                publish_date = self._extract_publish_date_from_chapter(chapter_soup)
+
+                if publish_date:
+                    detail["first_upload_date"] = publish_date
+                    self.logger.info(f"从第一章提取到上架时间: {publish_date}")
+                    return
+
+            # 如果没有找到，尝试使用其他方法
+            self.logger.debug("未能从章节页面提取上架时间，尝试其他方法")
+
+            # 方法1：查找包含"首发"、"发布"或"更新"的文本
+            chapter_text = ""
+            if chapter_soup:
+                chapter_text = self._normalize_text(chapter_soup.get_text(" ", strip=True))
+
+            # 在章节文本中搜索日期
+            date_patterns = [
+                r'首发时间[：:]?\s*(\d{4})[年.-](\d{1,2})[月.-](\d{1,2})[日]?',
+                r'发布时间[：:]?\s*(\d{4})[年.-](\d{1,2})[月.-](\d{1,2})[日]?',
+                r'更新时间[：:]?\s*(\d{4})[年.-](\d{1,2})[月.-](\d{1,2})[日]?',
+                r'(\d{4})年(\d{1,2})月(\d{1,2})日[^\d]',  # 前面不能是数字
+                r'(\d{4})-(\d{1,2})-(\d{1,2})\b',
+                r'(\d{4})\.(\d{1,2})\.(\d{1,2})\b',
+            ]
+
+            for pattern in date_patterns:
+                date_match = re.search(pattern, chapter_text)
+                if date_match:
+                    groups = date_match.groups()
+                    if len(groups) >= 3:
+                        year = groups[0]
+                        month = groups[1].zfill(2)
+                        day = groups[2].zfill(2)
+                        first_upload_date = f"{year}-{month}-{day}"
+                        detail["first_upload_date"] = first_upload_date
+                        self.logger.info(f"从章节文本提取到上架时间: {first_upload_date}")
+                        return
+
+            # 方法2：查找时间元素
+            time_elements = []
+            if chapter_soup:
+                time_elements = chapter_soup.select('time, .time, .date, .publish-time')
+
+            for time_elem in time_elements:
+                time_text = self._normalize_text(time_elem.get_text(strip=True))
+
+                # 尝试解析日期格式
+                date_match = re.search(r'(\d{4})[年.-](\d{1,2})[月.-](\d{1,2})[日]?', time_text)
+                if date_match:
+                    year = date_match.group(1)
+                    month = date_match.group(2).zfill(2)
+                    day = date_match.group(3).zfill(2) if date_match.group(3) else "01"
+                    first_upload_date = f"{year}-{month}-{day}"
+                    detail["first_upload_date"] = first_upload_date
+                    self.logger.info(f"从时间元素提取到上架时间: {first_upload_date}")
+                    return
+
+            self.logger.debug("未能提取到上架时间")
+            detail["first_upload_date"] = ""
+
+        except Exception as e:
+            self.logger.error(f"提取上架时间失败: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            detail["first_upload_date"] = ""
+
     def _fetch_single_chapter(self, chapter_url: str) -> Optional[str]:
         """获取单章内容"""
         try:
@@ -1656,41 +1834,8 @@ class QidianSpider(BaseSpider):
             self.logger.error(f'获取章节内容失败 {chapter_url}: {e}')
             return None
 
-    def _extract_novel_title_from_catalog(self, soup: BeautifulSoup, book_id: str) -> str:
-        """从目录页提取小说标题"""
-        try:
-            # 方法1: 从meta标签提取
-            title_meta = soup.select_one('meta[property="og:title"]')
-            if title_meta:
-                novel_title = title_meta.get('content', '').strip()
-                # 清理标题，移除可能的后缀
-                if ' - ' in novel_title:
-                    novel_title = novel_title.split(' - ')[0]
-                return novel_title
-
-            # 方法2: 从h1标签提取
-            h1_title = soup.select_one('h1.book-title, h1.works-title, .book-info h1')
-            if h1_title and h1_title.text.strip():
-                return h1_title.text.strip()
-
-            # 方法3: 尝试从面包屑导航提取
-            breadcrumb = soup.select_one('.crumb, .breadcrumb, .site-nav')
-            if breadcrumb:
-                breadcrumb_text = breadcrumb.get_text()
-                if '>' in breadcrumb_text:
-                    parts = breadcrumb_text.split('>')
-                    if parts:
-                        return parts[-1].strip()
-
-            # 方法4: 从URL中获取的book_id构建
-            # 如果没有找到标题，返回一个默认标题
-            return f'小说_{book_id}'
-
-        except Exception as e:
-            self.logger.debug(f'从目录页提取标题失败: {e}')
-            return f'小说_{book_id}'
-
-    def _fetch_novel_chapters_from_website(self, novel_url: str, novel_id: str, chapter_count: int) -> List[Dict[str, Any]]:
+    def _fetch_novel_chapters_from_website(self, novel_url: str, novel_id: str, chapter_count: int,
+                                           first_upload_date: str = "") -> List[Dict[str, Any]]:
         """从网站抓取小说章节内容"""
         try:
             # 从小说URL提取book_id
@@ -1713,9 +1858,6 @@ class QidianSpider(BaseSpider):
             if not soup:
                 return []
 
-            # 从目录页提取书籍标题
-            novel_title = self._extract_novel_title_from_catalog(soup, book_id)
-
             # 提取章节链接
             chapter_infos = self._extract_chapter_links(soup, book_id)
 
@@ -1735,14 +1877,16 @@ class QidianSpider(BaseSpider):
                     chapter_content = self._fetch_single_chapter(chapter_url)
 
                     if chapter_content:
+                        # 优先使用从章节链接提取的发布时间
+                        publish_date = first_post_time if first_post_time else first_upload_date
+
                         chapter_data = {
                             'chapter_num': i,
                             'chapter_title': chapter_title,
                             'chapter_content': chapter_content,
                             'chapter_url': chapter_url,
-                            'publish_date': first_post_time if first_post_time else "",
+                            'publish_date': publish_date,  # 使用正确的发布时间
                             'word_count': word_count,
-                            'novel_title': novel_title
                         }
 
                         chapters.append(chapter_data)
@@ -1762,7 +1906,6 @@ class QidianSpider(BaseSpider):
             self.logger.error(f'获取章节列表失败: {e}')
             return []
 
-    # 更新 fetch_first_n_chapters 方法，使用新的章节获取逻辑
     def fetch_first_n_chapters(self, novel_url: str, n: Optional[int] = None) -> List[Dict[str, Any]]:
         """获取小说前N章内容（智能补全：只获取缺失的章节）
 
@@ -1789,6 +1932,8 @@ class QidianSpider(BaseSpider):
             # 从详情中提取书名和上架时间
             novel_title = detail.get('title', '')
             first_upload_date = detail.get('first_upload_date', '')
+
+            self.logger.info(f'获取到上架时间: {first_upload_date}')
 
             # 检查数据库中已有的章节
             existing_chapter_count = 0
@@ -1847,8 +1992,10 @@ class QidianSpider(BaseSpider):
             if existing_chapters:
                 max_existing_chapter_num = max([ch.get('chapter_num', 0) for ch in existing_chapters])
 
-            # 从网站抓取章节
-            new_chapters = self._fetch_novel_chapters_from_website(novel_url, novel_id, need_chapter_count)
+            # 从网站抓取章节，传递上架时间
+            new_chapters = self._fetch_novel_chapters_from_website(
+                novel_url, novel_id, need_chapter_count, first_upload_date=first_upload_date
+            )
 
             if not new_chapters:
                 self.logger.warning('未能获取到新章节')
@@ -1914,7 +2061,13 @@ class QidianSpider(BaseSpider):
                     'tags': detail.get('tags', []),
                     'status': detail.get('status', ''),
                     'total_words': detail.get('total_words', 0),
+                    'first_upload_date': first_upload_date,
                 }
+
+                # 记录每个章节的发布时间用于调试
+                for i, chapter in enumerate(new_chapters, 1):
+                    chapter_publish_date = chapter.get('publish_date', '')
+                    self.logger.info(f'章节{i}的发布时间: {chapter_publish_date}')
 
                 # 只保存新章节
                 self.db_handler.save_novel(novel_data, new_chapters)
@@ -1944,11 +2097,17 @@ class QidianSpider(BaseSpider):
 
         out: List[Dict[str, Any]] = []
         for i, book in enumerate(items[:max_books], 1):
-            self.logger.info(f"Enrich {i}/{min(len(items), max_books)}: {book.get('title', '')}")
+            title = book.get('title', '未知')
+            self.logger.info(f"[数据丰富] 处理第{i}/{min(len(items), max_books)}本书: 《{title}》")
             enriched = dict(book)
 
             if fetch_detail:
                 detail = self.fetch_novel_detail(enriched.get("url", ""), enriched.get("platform_novel_id", ""))
+
+                # 记录处理前的分类信息
+                original_main = enriched.get("main_category", "")
+                original_tags = enriched.get("tags", [])
+                self.logger.info(f"[数据丰富] 《{title}》 原有分类 - 主分类: '{original_main}', 标签: {original_tags}")
 
                 # 更新所有字段，包括总推荐数
                 update_fields = ["title", "author", "intro", "status", "total_words",
@@ -1966,18 +2125,31 @@ class QidianSpider(BaseSpider):
 
                 # 分类处理：优先使用详情页的分类，但避免用"未知"覆盖正确的分类
                 detail_main_cat = detail.get("main_category")
+                detail_tags = detail.get("tags", [])
+
                 if detail_main_cat and detail_main_cat != "未知":
+                    self.logger.info(f"[数据丰富] 使用详情页主分类: '{detail_main_cat}' (替换原有: '{original_main}')")
                     enriched["main_category"] = detail_main_cat
+                else:
+                    self.logger.info(f"[数据丰富] 保留原有主分类: '{original_main}'")
 
                 # 合并标签
                 existing_tags = set(enriched.get("tags", []))
                 new_tags = set(detail.get("tags", []))
-                enriched["tags"] = list(existing_tags.union(new_tags))
+                merged_tags = list(existing_tags.union(new_tags))
+
+                if merged_tags != original_tags:
+                    self.logger.info(f"[数据丰富] 合并标签: {original_tags} + {list(new_tags)} = {merged_tags}")
+                enriched["tags"] = merged_tags
+
+                self.logger.info(
+                    f"[数据丰富] 《{title}》 最终分类 - 主分类: '{enriched.get('main_category')}', 标签: {enriched.get('tags', [])}")
 
             if fetch_chapters:
                 chapters = self.fetch_first_n_chapters(enriched.get("url", ""), n=chapter_count)
                 if chapters:
                     enriched["first_n_chapters"] = chapters
+                    self.logger.info(f"[数据丰富] 《{title}》 获取到 {len(chapters)} 章内容")
 
             out.append(enriched)
             self._sleep_human(2, 4)
@@ -1997,6 +2169,9 @@ class QidianSpider(BaseSpider):
             chapter_count=None,
         )
 
+    # ------------------------------------------------------------------
+    # Database Operations
+    # ------------------------------------------------------------------
     def save_rank_snapshot(
             self,
             *,
@@ -2086,10 +2261,20 @@ class QidianSpider(BaseSpider):
                 if not chapters:
                     continue
 
+                # 调试：检查章节发布时间
+                self.logger.info(f"准备保存小说 {b.get('title')} 的章节")
+                for i, chapter in enumerate(chapters, 1):
+                    publish_date = chapter.get('publish_date', '')
+                    self.logger.info(f"章节{i}发布时间: {publish_date}")
+
+                first_chapter_publish_date = ""
+                if chapters:
+                    first_chapter_publish_date = chapters[0].get('publish_date', snapshot_date or self._today_str())
+
                 self.db_handler.upsert_first_n_chapters(
                     platform="qidian",
                     platform_novel_id=b.get("platform_novel_id", ""),
-                    publish_date=(snapshot_date or self._today_str()),
+                    publish_date=first_chapter_publish_date,
                     chapters=chapters,
                     novel_fallback_fields={
                         "title": b.get("title", ""),
@@ -2112,9 +2297,9 @@ class QidianSpider(BaseSpider):
         }
 
     # ------------------------------------------------------------------
-    # BaseSpider API: fetch_all_ranks
+    # BaseSpider API: fetch_all_ranks, 一键启动
     # ------------------------------------------------------------------
-    def fetch_all_ranks(self):
+    def fetch_whole_rank(self):
         """Fetch all configured rank lists and return a flattened list of items."""
         all_books: List[Dict[str, Any]] = []
         for rank_type in (self.site_config.get("rank_urls") or {}):

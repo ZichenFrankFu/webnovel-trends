@@ -403,7 +403,7 @@ class FanqieSpider(BaseSpider):
 
         return enriched_books
 
-    def fetch_all_ranks(self):
+    def fetch_whole_rank(self):
         """抓取所有榜单"""
         all_books = []
 

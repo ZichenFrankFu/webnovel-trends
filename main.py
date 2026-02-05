@@ -38,7 +38,7 @@ def run_once():
     # 抓取起点数据
     print("\n抓取起点榜单...")
     try:
-        qidian_books = qidian_spider.fetch_all_ranks()
+        qidian_books = qidian_spider.fetch_whole_rank()
         print(f"起点抓取完成: {len(qidian_books)} 本书")
 
         # 补充详情并抓取章节
@@ -72,7 +72,7 @@ def run_once():
     # 抓取番茄数据
     print("\n抓取番茄榜单...")
     try:
-        fanqie_books = fanqie_spider.fetch_all_ranks()
+        fanqie_books = fanqie_spider.fetch_whole_rank()
         print(f"番茄抓取完成: {len(fanqie_books)} 本书")
 
         # 补充详情并抓取章节

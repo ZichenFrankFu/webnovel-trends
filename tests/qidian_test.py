@@ -435,7 +435,7 @@ def _test_all_ranks(spider, db):
     print(f"{'=' * 60}")
 
     try:
-        all_books = spider.fetch_all_ranks()
+        all_books = spider.fetch_whole_rank()
         print(f"[成功] 抓取了所有榜单，共 {len(all_books)} 本书籍")
 
         # 统计分类信息

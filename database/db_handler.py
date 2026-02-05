@@ -78,29 +78,29 @@ def sha1_hex(s: str) -> str:
 def normalize_status(platform: str, raw_status: str) -> str:
     """
     Normalize platform statuses into:
-      - ongoing
-      - completed
+      - 连载
+      - 完本
     """
     s = (raw_status or "").strip()
     if not s:
-        return "ongoing"
+        return "连载"
 
     if platform == "qidian":
         # 起点：连载 / 完本
         if "完" in s:
-            return "completed"
-        return "ongoing"
+            return "完本"
+        return "连载"
 
     if platform == "fanqie":
         # 番茄：连载中 / 已完结
         if "完结" in s:
-            return "completed"
-        return "ongoing"
+            return "完本"
+        return "连载"
 
     # fallback heuristic
     if any(k in s for k in ["完结", "完本", "已完结"]):
-        return "completed"
-    return "ongoing"
+        return "完本"
+    return "连载"
 
 
 # --------------------------

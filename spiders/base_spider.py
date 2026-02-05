@@ -378,7 +378,7 @@ class BaseSpider(ABC):
         pass
 
     @abstractmethod
-    def fetch_all_ranks(self) -> List[Dict[str, Any]]:
+    def fetch_whole_rank(self) -> List[Dict[str, Any]]:
         """获取所有配置的榜单数据
 
         Returns:

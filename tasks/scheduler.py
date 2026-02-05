@@ -49,7 +49,7 @@ class TaskScheduler:
             # 1. 爬取起点数据
             self.logger.info("爬取起点中文网...")
             qidian_spider = QidianSpider(WEBSITES['qidian'])
-            qidian_books = qidian_spider.fetch_all_ranks()
+            qidian_books = qidian_spider.fetch_whole_rank()
 
             # 为前20本书补充详情
             enriched_qidian = qidian_spider.enrich_books_with_details(qidian_books, max_books=20)
@@ -63,7 +63,7 @@ class TaskScheduler:
             # 2. 爬取番茄数据
             self.logger.info("爬取番茄小说...")
             fanqie_spider = FanqieSpider(WEBSITES['fanqie'])
-            fanqie_books = fanqie_spider.fetch_all_ranks()
+            fanqie_books = fanqie_spider.fetch_whole_rank()
 
             # 为前15本书补充详情
             enriched_fanqie = fanqie_spider.enrich_books_with_details(fanqie_books, max_books=15)
