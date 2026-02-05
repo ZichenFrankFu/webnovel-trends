@@ -140,8 +140,8 @@ def run_scheduler():
 
 def main():
     parser = argparse.ArgumentParser(description='WebNovel Trends - 小说热点分析系统')
-    parser.add_argument('mode', choices=['once', 'scheduler', 'test', 'analyze'],
-                        help='运行模式: once(单次运行), scheduler(定时任务), test(测试), analyze(仅分析)')
+    parser.add_argument('mode', choices=['once', 'scheduler', 'tests', 'analyze'],
+                        help='运行模式: once(单次运行), scheduler(定时任务), tests(测试), analyze(仅分析)')
 
     args = parser.parse_args()
 

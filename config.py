@@ -7,14 +7,24 @@ WEBSITES = {
     'qidian': {
         'name': '起点中文网',
         'rank_urls': {
-            'recom': 'https://www.qidian.com/rank/recom/page{page}/',              # 推荐榜
+            'yuepiao': 'https://www.qidian.com/rank/yuepiao/page{page}/',          # 月票榜
             'hotsales': 'https://www.qidian.com/rank/hotsales/page{page}/',        # 畅销榜
+            'readIndex': 'https://www.qidian.com/rank/readIndex/page{page}/',      # 阅读指数榜
+            'recom': 'https://www.qidian.com/rank/recom/page{page}/',              # 推荐榜
+            'collect': 'https://www.qidian.com/rank/collect/page{page}/',          # 收藏榜
             'signnewbook': 'https://www.qidian.com/rank/signnewbook/page{page}/',  # 签约作者新书榜
             'pubnewbook': 'https://www.qidian.com/rank/pubnewbook/page{page}/',    # 公众作者新书榜
             'newsign': 'https://www.qidian.com/rank/newsign/page{page}/',          # 新人签约新书榜
             'newauthor': 'https://www.qidian.com/rank/newauthor/page{page}/',      # 新人作者新书榜
         },
         'base_url': 'https://www.qidian.com',
+        'novel_types': ['玄幻','奇幻',
+                        '武侠','仙侠',
+                        '都市','现实',
+                        '军事','历史',
+                        '游戏','体育',
+                        '科幻','诸天无限'
+                        '悬疑','轻小说','短篇'],
         'request_delay': 5,
         'pages_per_rank': 1,
         'chapter_extraction_goal':5,

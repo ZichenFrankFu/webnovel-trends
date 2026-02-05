@@ -10,7 +10,7 @@ logs/
 # outputs
 outputs/
 
-# your test folder
+# your tests folder
 test_output/
 
 # OS junk

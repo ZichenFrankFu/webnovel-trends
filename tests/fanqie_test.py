@@ -18,14 +18,14 @@ def test_all_features():
     print("\n1. 测试数据库连接...")
     try:
         # 使用完整路径避免问题
-        test_db_path = os.path.join(os.getcwd(), 'test_output', 'test.db')
+        test_db_path = os.path.join(os.getcwd(), 'test_output', 'tests.db')
         db = DatabaseHandler(test_db_path)
         print(f"   数据库初始化成功: {test_db_path}")
 
         # 测试保存数据
         test_data = {
             'novel_id': 'test_123',
-            'platform': 'test',
+            'platform': 'tests',
             'title': '测试小说',
             'author': '测试作者',
             'rank': 1,
