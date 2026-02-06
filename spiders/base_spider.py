@@ -8,9 +8,8 @@ import logging
 import random
 from abc import ABC, abstractmethod
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Sequence
 from urllib.parse import urljoin
-
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -228,77 +227,6 @@ class BaseSpider(ABC):
         """模拟人类操作的随机延迟"""
         time.sleep(random.uniform(min_time, max_time))
 
-    def _today_str(self) -> str:
-        """获取今日日期字符串 (YYYY-MM-DD)"""
-        return date.today().strftime("%Y-%m-%d")
-
-    def _to_abs_url(self, href: str) -> str:
-        """将相对URL转换为绝对URL"""
-        if not href:
-            return ""
-        if href.startswith("//"):
-            return "https:" + href
-        if href.startswith("http"):
-            return href
-        return urljoin(self.base_url, href)
-
-    def _save_raw_data(self, data: Any, filename: str) -> None:
-        """保存原始数据到文件
-
-        Args:
-            data: 要保存的数据
-            filename: 文件名
-        """
-        raw_data_dir = 'outputs/data/raw'
-        os.makedirs(raw_data_dir, exist_ok=True)
-
-        filepath = os.path.join(raw_data_dir, filename)
-        with open(filepath, 'w', encoding='utf-8') as f:
-            if isinstance(data, (dict, list)):
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            else:
-                f.write(str(data))
-
-        self.logger.debug(f"Raw data saved: {filepath}")
-
-    def _normalize_text(self, text: str) -> str:
-        """标准化文本：去除多余空白字符"""
-        if not text:
-            return ""
-        return ' '.join(text.split())
-
-    def _parse_cn_number(self, text: str) -> Optional[int]:
-        """解析中文数字表示（如'12.3万'、'1.2亿'）为整数
-
-        Args:
-            text: 包含中文数字的文本
-
-        Returns:
-            Optional[int]: 解析后的整数，解析失败返回None
-        """
-        if not text:
-            return None
-
-        text = text.strip().replace(',', '')
-
-        # 匹配数字和单位
-        import re
-        pattern = r'([0-9]+(?:\.[0-9]+)?)\s*([万亿]?)'
-        match = re.search(pattern, text)
-
-        if not match:
-            return None
-
-        value = float(match.group(1))
-        unit = match.group(2)
-
-        if unit == '万':
-            value *= 10000
-        elif unit == '亿':
-            value *= 100000000
-
-        return int(value)
-
     def _get_soup(self, url: str, wait_css: Optional[str] = None,
                   wait_sec: int = 10) -> Optional[Any]:
         """使用Selenium获取页面并返回BeautifulSoup对象
@@ -506,10 +434,92 @@ class BaseSpider(ABC):
             finally:
                 self.driver = None
 
+    # ------------------------------------------------------------------
+    # Common Utils
+    # ------------------------------------------------------------------
+    def _today_str(self) -> str:
+        """获取今日日期字符串 (YYYY-MM-DD)"""
+        return date.today().strftime("%Y-%m-%d")
+
+    def _to_abs_url(self, href: str) -> str:
+        """将相对URL转换为绝对URL"""
+        if not href:
+            return ""
+        if href.startswith("//"):
+            return "https:" + href
+        if href.startswith("http"):
+            return href
+        return urljoin(self.base_url, href)
+
+    def _save_raw_data(self, data: Any, filename: str) -> None:
+        """保存原始数据到文件
+
+        Args:
+            data: 要保存的数据
+            filename: 文件名
+        """
+        raw_data_dir = 'outputs/data/raw'
+        os.makedirs(raw_data_dir, exist_ok=True)
+
+        filepath = os.path.join(raw_data_dir, filename)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            if isinstance(data, (dict, list)):
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            else:
+                f.write(str(data))
+
+        self.logger.debug(f"Raw data saved: {filepath}")
+
+    def _normalize_text(self, text: str) -> str:
+        """标准化文本：去除多余空白字符"""
+        if not text:
+            return ""
+        return ' '.join(text.split())
+
+    def _parse_cn_number(self, text: str) -> Optional[int]:
+        """解析中文数字表示（如'12.3万'、'1.2亿'）为整数
+
+        Args:
+            text: 包含中文数字的文本
+
+        Returns:
+            Optional[int]: 解析后的整数，解析失败返回None
+        """
+        if not text:
+            return None
+
+        text = text.strip().replace(',', '')
+
+        # 匹配数字和单位
+        import re
+        pattern = r'([0-9]+(?:\.[0-9]+)?)\s*([万亿]?)'
+        match = re.search(pattern, text)
+
+        if not match:
+            return None
+
+        value = float(match.group(1))
+        unit = match.group(2)
+
+        if unit == '万':
+            value *= 10000
+        elif unit == '亿':
+            value *= 100000000
+
+        return int(value)
+
+    def _dedupe_keep_order(self, xs: Sequence[str]) -> List[str]:
+        """Dedupe strings while keeping original order."""
+        seen = set()
+        out: List[str] = []
+        for x in xs:
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
 
 class MockResponse:
     """模拟requests.Response对象，用于测试"""
-
     def __init__(self, html: str, encoding: str = 'utf-8'):
         self.text = html
         self.content = html.encode(encoding) if isinstance(html, str) else html

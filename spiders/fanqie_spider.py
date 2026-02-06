@@ -196,54 +196,6 @@ class FanqieSpider(BaseSpider):
     # ------------------------------------------------------------------
     # Utils
     # ------------------------------------------------------------------
-    def _today_str(self) -> str:
-        """Return today's date string (YYYY-MM-DD)."""
-        return date.today().strftime("%Y-%m-%d")
-
-    def _sleep_human(self, a: float = 1.0, b: float = 3.0) -> None:
-        """Sleep a random duration to reduce bot-like behaviour."""
-        time.sleep(random.uniform(a, b))
-
-    def _to_abs_url(self, href: str) -> str:
-        """Convert href to absolute URL."""
-        if not href:
-            return ""
-        if href.startswith("//"):
-            return "https:" + href
-        if href.startswith("http"):
-            return href
-        return urljoin(self.base_url, href)
-
-    def _normalize_text(self, s: str) -> str:
-        """Normalize whitespace for consistent parsing."""
-        s = (s or "").strip()
-        return re.sub(r"\s+", " ", s)
-
-    def _dedupe_keep_order(self, xs: Sequence[str]) -> List[str]:
-        """Dedupe strings while keeping original order."""
-        seen = set()
-        out: List[str] = []
-        for x in xs:
-            if x not in seen:
-                seen.add(x)
-                out.append(x)
-        return out
-
-    def _parse_cn_number(self, text: str) -> Optional[int]:
-        """Parse Chinese compact number like '12.3万' / '1.2亿' -> int."""
-        if not text:
-            return None
-        t = text.strip().replace(",", "")
-        m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([万亿]?)", t)
-        if not m:
-            return None
-        val = float(m.group(1))
-        unit = m.group(2)
-        if unit == "万":
-            val *= 10_000
-        elif unit == "亿":
-            val *= 100_000_000
-        return int(val)
 
     def _decrypt_text(self, text: str) -> str:
         """解密字体加密的文本"""

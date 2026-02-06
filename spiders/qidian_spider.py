@@ -2,16 +2,16 @@
 """QidianSpider (起点中文网爬虫)
 
 Phase 1 目标：
-- 使用 Selenium 抓取起点各类榜单（畅销榜/月票榜/推荐榜/收藏榜/新书榜等）
+- 使用 Selenium 抓取起点各类榜单
 - 抽取小说元信息（书名、作者、简介、主分类、细分题材 tag、状态、总字数）
 - 抓取前 N 章正文用于后续开篇分析（FIRST_N_CHAPTERS）
 
-数据库对齐
+数据库相关
 - NOVELS.main_category：只存主分类（如"都市""玄幻"）
-- 起点"副分类"当作一个 tag 进入 TAGS / NOVEL_TAG_MAP
+- 起点"副分类"当作一个 tag 进入 TAGS / NOVEL_TAG_MAP （如"异术超能"）
 - RANK_LISTS：rank_family 存大榜（畅销榜/月票榜/推荐榜/收藏榜/新书榜）
-  rank_sub_cat 仅用于起点新书榜四小类，其它为空
-- RANK_ENTRIES：起点指标使用 total_recommend（总推荐）
+  rank_sub_cat 仅用于起点新书榜四小类（签约作者，公众作者，新人签约，新人作者），其它为空
+- RANK_ENTRIES：起点指标使用 total_recommend（总推荐）作为热度参考
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 import config
 from .base_spider import BaseSpider
+
 # Load global config
 GLOBAL_SELENIUM_CONFIG = getattr(config, "SELENIUM_CONFIG", {}) or {}
 
@@ -48,33 +49,27 @@ class RankIdentity:
 """起点中文网 Selenium 爬虫"""
 class QidianSpider(BaseSpider):
     """
-    该 Spider 在 Phase 1 主要负责：
-    1) 抓取榜单页（可多页）
+    功能：
+    1) 抓取榜单页（可多页，获取榜上书籍信息：排名/书名/分类/作者等信息）
     2) 抓取详情页（补全元信息：分类/状态/字数/简介等）
-    3) 抓取前 N 章（FIRST_N_CHAPTERS）
-    4) 输出"可直接落库"的标准化结构；如注入 db_handler 可直接写入数据库
-
-    重要接口（BaseSpider 抽象方法要求）：
-    - fetch_rank_list
-    - fetch_novel_detail
-    - enrich_books_with_details
-    - fetch_all_ranks
+    3) 抓取前 N 章免费章节
+    4) 将抓取到的数据写入数据库
     """
 
+    """初始化起点爬虫"""
     def __init__(self, site_config: Dict[str, Any], db_handler: Any = None):
-        """Initialize Qidian spider.
-
+        """
         Args:
-            site_config: Site configuration dict. Key fields:
-                - base_url: str
-                - rank_urls: dict[str, str] (url template supports {page})
-                - pages_per_rank: int
-                - chapter_extraction_goal: int
-                - selenium_specific: optional selenium overrides
-            db_handler: Optional DB handler. If provided and exposes:
-                - save_rank_snapshot(...)
-                - upsert_first_n_chapters(...)
-              then this spider can persist results directly.
+            site_config: 站点配置字典，关键字段：
+            - base_url: str
+            - rank_urls: dict[str, str] (url模板支持{page})
+            - pages_per_rank: int
+            - chapter_extraction_goal: int
+            - selenium_specific: 可选的selenium覆盖配置
+            - max_retries: 最大重试次数，默认3
+        db_handler: 数据库处理器，负责将抓取到的内容持久化，加入数据库
+            - save_rank_snapshot(...)
+            - upsert_first_n_chapters(...)
         """
         super().__init__(site_config)
 
@@ -204,54 +199,6 @@ class QidianSpider(BaseSpider):
     # ------------------------------------------------------------------
     # Utils
     # ------------------------------------------------------------------
-    def _today_str(self) -> str:
-        """Return today's date string (YYYY-MM-DD)."""
-        return date.today().strftime("%Y-%m-%d")
-
-    def _sleep_human(self, a: float = 2.0, b: float = 4.0) -> None:
-        """Sleep a random duration to reduce bot-like behaviour."""
-        time.sleep(random.uniform(a, b))
-
-    def _to_abs_url(self, href: str) -> str:
-        """Convert href to absolute URL."""
-        if not href:
-            return ""
-        if href.startswith("//"):
-            return "https:" + href
-        if href.startswith("http"):
-            return href
-        return urljoin(self.base_url, href)
-
-    def _normalize_text(self, s: str) -> str:
-        """Normalize whitespace for consistent parsing."""
-        s = (s or "").strip()
-        return re.sub(r"\s+", " ", s)
-
-    def _dedupe_keep_order(self, xs: Sequence[str]) -> List[str]:
-        """Dedupe strings while keeping original order."""
-        seen = set()
-        out: List[str] = []
-        for x in xs:
-            if x not in seen:
-                seen.add(x)
-                out.append(x)
-        return out
-
-    def _parse_cn_number(self, text: str) -> Optional[int]:
-        """Parse Chinese compact number like '12.3万' / '1.2亿' -> int."""
-        if not text:
-            return None
-        t = text.strip().replace(",", "")
-        m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([万亿]?)", t)
-        if not m:
-            return None
-        val = float(m.group(1))
-        unit = m.group(2)
-        if unit == "万":
-            val *= 10_000
-        elif unit == "亿":
-            val *= 100_000_000
-        return int(val)
 
     def _split_qidian_category(self, raw_category: str) -> Tuple[str, Optional[str]]:
         """Split '大类·副类' into (main_category, sub_as_tag)."""
@@ -2133,47 +2080,6 @@ class QidianSpider(BaseSpider):
             for i, chapter in enumerate(all_chapters, 1):
                 chapter['chapter_num'] = i
 
-            # 保存新章节到数据库
-            if self.db_handler and hasattr(self.db_handler, 'save_novel'):
-                self.logger.info(f'保存{len(new_chapters)}个新章节到数据库')
-                # 准备小说基本信息
-                novel_data = {
-                    'novel_id': novel_id,
-                    'title': novel_title,
-                    'author': detail.get('author', '未知'),
-                    'platform': 'qidian',
-                    'novel_url': novel_url,
-                    'category': detail.get('main_category', ''),
-                    'introduction': detail.get('intro', ''),
-                    'tags': detail.get('tags', []),
-                    'status': detail.get('status', ''),
-                    'total_words': detail.get('total_words', 0),
-                    'first_upload_date': first_upload_date,
-                }
-
-                # 在保存章节后添加调试信息
-                if self.db_handler and hasattr(self.db_handler, 'save_novel'):
-                    # 使用辅助方法获取显示标题
-                    display_title, title_source = self._get_display_title(novel_id, novel_title)
-
-                    self.logger.info("[数据库保存调试] 开始保存章节到数据库:")
-                    self.logger.info("  小说ID: %s", novel_id)
-                    self.logger.info("  标题: %s (来源: %s)", display_title, title_source)
-                    self.logger.info("  章节数: %d", len(new_chapters))
-
-                    # 验证章节数据
-                    for i, chapter in enumerate(new_chapters[:3], 1):
-                        chapter_title = chapter.get('chapter_title', '')
-                        word_count = chapter.get('word_count', 0)
-                        publish_date = chapter.get('publish_date', '')
-
-                        self.logger.info("  章节%d: 标题='%s'", i, chapter_title)
-                        self.logger.info("        字数: %d", word_count)
-                        self.logger.info("        发布时间: %s", publish_date)
-
-                # 只保存新章节
-                self.db_handler.save_novel(novel_data, new_chapters)
-
             # 只返回需要的数量
             return all_chapters[:n]
 
@@ -2368,11 +2274,7 @@ class QidianSpider(BaseSpider):
                 }
 
                 # 尝试直接保存章节
-                if hasattr(self.db_handler, 'save_novel'):
-                    self.logger.info("[章节智能补全] 使用 save_novel 方法保存章节")
-                    result = self.db_handler.save_novel(novel_data, new_chapters)
-                    self.logger.info(f"[章节智能补全] save_novel 返回结果: {result}")
-                elif hasattr(self.db_handler, 'upsert_first_n_chapters'):
+                if hasattr(self.db_handler, 'upsert_first_n_chapters'):
                     self.logger.info("[章节智能补全] 使用 upsert_first_n_chapters 方法保存章节")
 
                     # 获取第一个章节的发布时间
@@ -2508,7 +2410,7 @@ class QidianSpider(BaseSpider):
                 # 显示将要保存的章节信息
                 self.logger.info("[数据库调试] 将要保存的章节信息:")
                 for i, chapter in enumerate(new_chapters[:3], 1):
-                    self.logger.info("[数据库调试]   章节%d: 标题='%s', 字数=%d, 发布时间=%s",
+                    self.logger.info("[数据库章节保存]章节%d: 标题='%s', 字数=%d, 发布时间=%s",
                                      i, chapter.get('chapter_title', ''),
                                      chapter.get('word_count', 0),
                                      chapter.get('publish_date', ''))

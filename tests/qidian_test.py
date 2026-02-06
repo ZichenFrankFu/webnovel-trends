@@ -1,7 +1,6 @@
 # tests/qidian_test.py
 import os
 import sys
-import shutil
 import time
 import sqlite3
 import argparse
@@ -9,7 +8,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Any
 from functools import wraps
 from typing import Callable, Any
-
 # 添加项目路径
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
@@ -79,7 +77,7 @@ def _print_table_counts(db):
 
         for k, display_name in table_mapping.items():
             count = counts.get(k, 0)
-            status = "SUCCESS" if count > 0 else "FAIL"
+            status = "EMPTY" if count > 0 else ""
             print(f"  {status} {display_name:<15}: {count:>4} 条记录")
 
         total = sum(counts.get(k, 0) for k in table_mapping.keys())
@@ -972,23 +970,29 @@ def run_comprehensive_qidian_test(
     print(f"\n[2/4] 初始化起点爬虫...")
     from spiders.qidian_spider import QidianSpider
 
-    qidian_config = {
-        "name": "起点中文网",
-        "base_url": "https://www.qidian.com",
-        "request_delay": 2,
-        "pages_per_rank": pages,
-        "chapter_extraction_goal": chapter_n,
-        "rank_urls": {
-            "hotsales": "https://www.qidian.com/rank/hotsales/page{page}/",
-            "yuepiao": "https://www.qidian.com/rank/yuepiao/page{page}/",
-            "recom": "https://www.qidian.com/rank/recom/page{page}/",
-            "collect": "https://www.qidian.com/rank/collect/page{page}/",
-            "newbook": "https://www.qidian.com/rank/newbook/page{page}/",
-        },
-        "novel_types": ["玄幻", "奇幻", "武侠", "仙侠", "都市", "现实",
-                        "军事", "历史", "游戏", "体育", "科幻", "诸天无限",
-                        "悬疑", "轻小说", "短篇"]
-    }
+    qidian_config = WEBSITES.get('qidian', {}).copy()
+    if qidian_config:
+        qidian_config["pages_per_rank"] = pages
+        qidian_config["chapter_extraction_goal"] = chapter_n
+    else:
+        # 备用配置（如果config中没有）
+        qidian_config = {
+            "name": "起点中文网",
+            "base_url": "https://www.qidian.com",
+            "request_delay": 2,
+            "pages_per_rank": pages,
+            "chapter_extraction_goal": chapter_n,
+            "rank_urls": {
+                "hotsales": "https://www.qidian.com/rank/hotsales/page{page}/",
+                "yuepiao": "https://www.qidian.com/rank/yuepiao/page{page}/",
+                "recom": "https://www.qidian.com/rank/recom/page{page}/",
+                "collect": "https://www.qidian.com/rank/collect/page{page}/",
+                "newbook": "https://www.qidian.com/rank/newbook/page{page}/",
+            },
+            "novel_types": ["玄幻", "奇幻", "武侠", "仙侠", "都市", "现实",
+                            "军事", "历史", "游戏", "体育", "科幻", "诸天无限",
+                            "悬疑", "轻小说", "短篇"]
+        }
 
     spider = QidianSpider(qidian_config, db)
     print(f"  爬虫初始化完成")
