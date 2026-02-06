@@ -276,7 +276,7 @@ python tests/qidian_test.py --test quick
 ##### 测试完整流程（包括章节抓取）
 python tests/qidian_test.py --test full_pipeline --fetch_chapters --chapter_n 2
 
-##### 包测试所有功能
+##### 测试所有功能
 python tests/qidian_test.py
 
 ##### 测试特定榜单
@@ -284,3 +284,16 @@ python tests/qidian_test.py --rank_key yuepiao --pages 2
 
 ##### 只测试抓取详情
 python tests/qidian_test.py --test novel_detail
+
+#### 3. fanqie_test
+##### 快速测试
+python tests/fanqie_test.py --test quick
+
+##### 测试所有功能（榜单、详情、丰富数据、解密等）
+python tests/fanqie_test.py --test all
+
+##### 只测试榜单抓取
+python tests/fanqie_test.py --test rank_list
+
+##### 测试章节抓取
+python tests/fanqie_test.py --test chapters --fetch_chapters --chapter_n 3

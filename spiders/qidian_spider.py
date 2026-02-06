@@ -89,7 +89,7 @@ class QidianSpider(BaseSpider):
         self.db_handler = db_handler
 
         self.book_cache: Dict[str, Dict[str, Any]] = {}
-        self.retry_count = 5
+        self.retry_count = 0
         self.max_retries = int(site_config.get("max_retries", 3))
 
         self.selenium_config = self._build_selenium_config()
@@ -2297,7 +2297,7 @@ class QidianSpider(BaseSpider):
         }
 
     # ------------------------------------------------------------------
-    # BaseSpider API: fetch_all_ranks, 一键启动
+    # BaseSpider API: fetch_whole_ranks, 一键启动
     # ------------------------------------------------------------------
     def fetch_whole_rank(self):
         """Fetch all configured rank lists and return a flattened list of items."""

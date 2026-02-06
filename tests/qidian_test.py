@@ -1,4 +1,4 @@
-# test/qidian_test.py
+# tests/qidian_test.py
 import os
 import sys
 import shutil
@@ -14,18 +14,47 @@ def _project_root() -> str:
 
 
 def _ensure_clean_dirs():
-    """Remove old test artifacts and create required output dirs."""
-    test_dirs = ["test_output", "outputs/debug"]
-    for d in test_dirs:
-        if os.path.exists(d):
-            try:
-                shutil.rmtree(d)
-                print(f"[cleanup] removed: {d}")
-            except Exception as e:
-                print(f"[cleanup] failed to remove {d}: {e}")
+    """清理旧的测试产物并创建必要的输出目录"""
 
+    # 1. 只清除 qidian_test.db，保留其他数据库文件
+    qidian_db_path = "qidian_test.db"
+    if os.path.exists(qidian_db_path):
+        try:
+            os.remove(qidian_db_path)
+            print(f"[清理] 已删除: {qidian_db_path}")
+        except Exception as e:
+            print(f"[清理] 删除 {qidian_db_path} 失败: {e}")
+
+    # 2. 处理 outputs/debug 目录，将其移动到 test_output/debug
+    source_debug_dir = "outputs/debug"
+    target_debug_dir = "test_output/debug"
+
+    if os.path.exists(source_debug_dir):
+        try:
+            # 确保目标目录的父目录存在
+            os.makedirs("test_output", exist_ok=True)
+
+            # 如果目标目录已存在，先删除
+            if os.path.exists(target_debug_dir):
+                shutil.rmtree(target_debug_dir)
+                print(f"[清理] 已删除旧的目标目录: {target_debug_dir}")
+
+            # 移动目录
+            shutil.move(source_debug_dir, target_debug_dir)
+            print(f"[移动] 已将 {source_debug_dir} 移动到 {target_debug_dir}")
+
+            # 删除空的原目录
+            parent_dir = os.path.dirname(source_debug_dir)
+            if os.path.exists(parent_dir) and not os.listdir(parent_dir):
+                os.rmdir(parent_dir)
+                print(f"[清理] 已删除空目录: {parent_dir}")
+
+        except Exception as e:
+            print(f"[移动] 移动 {source_debug_dir} 到 {target_debug_dir} 失败: {e}")
+
+    # 3. 确保必要的目录存在
     os.makedirs("test_output", exist_ok=True)
-    os.makedirs("outputs/debug", exist_ok=True)
+    os.makedirs("test_output/debug", exist_ok=True)
 
 
 def _open_sqlite(db_path: str) -> sqlite3.Connection:

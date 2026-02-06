@@ -25,30 +25,39 @@ WEBSITES = {
                         '游戏','体育',
                         '科幻','诸天无限'
                         '悬疑','轻小说','短篇'],
-        'request_delay': 5,
+        'request_delay': 2,
         'pages_per_rank': 1,
         'chapter_extraction_goal':5,
         'selenium_specific': {
-            'method': 'dynamic',  # 动态加载方式
-        }
+            'method': 'dynamic',
+        },
+        'max_retries': 5,
     },
     'fanqie': {
         'name': '番茄小说',
         'rank_urls': {
-            'scifi_apocalypse': 'https://fanqienovel.com/rank/1_2_8',      # 科幻末世
-            'urban_martial': 'https://fanqienovel.com/rank/1_2_1014',      # 都市高武
-            'suspense_brainhole': 'https://fanqienovel.com/rank/1_2_539',  # 悬疑脑洞
-            'urban_brainhole': 'https://fanqienovel.com/rank/1_2_262',     # 都市脑洞
-            'anime_derivation': 'https://fanqienovel.com/rank/1_2_718',    # 动漫衍生
+            'read_western_fantasy': 'https://fanqienovel.com/rank/1_2_1141',    # 阅读榜·西方奇幻
+            'read_scifi_apocalypse': 'https://fanqienovel.com/rank/1_2_8',      # 阅读榜·科幻末世
+            'read_urban_highmartial': 'https://fanqienovel.com/rank/1_2_1014',  # 阅读榜·都市高武
+            'read_suspense_brainhole': 'https://fanqienovel.com/rank/1_2_539',  # 阅读榜·悬疑脑洞
+            'read_urban_brainhole': 'https://fanqienovel.com/rank/1_2_262',     # 阅读榜·都市脑洞
+            'read_anime': 'https://fanqienovel.com/rank/1_2_718',               # 阅读榜·动漫衍生
+            'new_western_fantasy': 'https://fanqienovel.com/rank/1_1_1141',     # 新书榜·西方奇幻
+            'new_scifi_apocalypse': 'https://fanqienovel.com/rank/1_1_8',       # 新书榜·科幻末世
+            'new_urban_highmartial': 'https://fanqienovel.com/rank/1_1_1014',   # 新书榜·都市高武
+            'new_suspense_brainhole': 'https://fanqienovel.com/rank/1_1_539',   # 新书榜·悬疑脑洞
+            'new_urban_brainhole': 'https://fanqienovel.com/rank/1_1_262',      # 新书榜·都市脑洞
+            'new_anime': 'https://fanqienovel.com/rank/1_1_718',                # 新书榜·动漫衍生
         },
         'base_url': 'https://fanqienovel.com',
-        'request_delay': 3,
+        'request_delay': 2,
         'selenium_specific': {
             'method': 'scroll_load',  # 滚动加载方式
             'target_count': 30,        # 目标加载数量
             'scroll_delay': 2,         # 滚动延迟
             'max_scroll_attempts': 10, # 最大滚动尝试次数
-        }
+        },
+        'max_retries': 5,
     }
 }
 
