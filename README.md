@@ -270,20 +270,20 @@ erDiagram
 pip install -r requirements.txt
 ```
 #### 2. qidian_test
-##### 快速测试
+##### 快速测试（基本功能）
 python tests/qidian_test.py --test quick
 
-##### 测试完整流程（包括章节抓取）
-python tests/qidian_test.py --test full_pipeline --fetch_chapters --chapter_n 2
+##### 完整测试（所有功能）
+python tests/qidian_test.py --test all --pages 2 --top_n 5 --verbose
 
-##### 测试所有功能
-python tests/qidian_test.py
+##### 只测试榜单抓取（前3本书，1页）
+python tests/qidian_test.py --test rank_list --pages 1 --top_n 3
 
-##### 测试特定榜单
-python tests/qidian_test.py --rank_key yuepiao --pages 2
+##### 测试完整流程（含章节抓取）
+python tests/qidian_test.py --test full_pipeline --pages 1 --top_n 2 --fetch_chapters --chapter_n 2
 
-##### 只测试抓取详情
-python tests/qidian_test.py --test novel_detail
+##### 测试智能补全
+python tests/qidian_test.py --test enrich --pages 1 --top_n 3 --fetch_chapters --chapter_n 5
 
 #### 3. fanqie_test
 ##### 快速测试

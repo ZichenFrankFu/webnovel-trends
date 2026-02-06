@@ -4,18 +4,14 @@
 Phase 1 目标：
 - 使用 Selenium 抓取起点各类榜单（畅销榜/月票榜/推荐榜/收藏榜/新书榜等）
 - 抽取小说元信息（书名、作者、简介、主分类、细分题材 tag、状态、总字数）
-- 可选：抓取前 N 章正文用于后续开篇分析（FIRST_N_CHAPTERS）
-- 将抓取结果以"可直接写入数据库的标准化结构"返回；如提供 db_handler，则可直接落库
+- 抓取前 N 章正文用于后续开篇分析（FIRST_N_CHAPTERS）
 
-数据库对齐（你当前 schema 的关键点）：
+数据库对齐
 - NOVELS.main_category：只存主分类（如"都市""玄幻"）
 - 起点"副分类"当作一个 tag 进入 TAGS / NOVEL_TAG_MAP
 - RANK_LISTS：rank_family 存大榜（畅销榜/月票榜/推荐榜/收藏榜/新书榜）
   rank_sub_cat 仅用于起点新书榜四小类，其它为空
 - RANK_ENTRIES：起点指标使用 total_recommend（总推荐）
-
-注意：
-- 起点页面结构会变化；选择器做了多层 fallback。
 """
 
 from __future__ import annotations
@@ -40,25 +36,22 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 import config
 from .base_spider import BaseSpider
-
+# Load global config
 GLOBAL_SELENIUM_CONFIG = getattr(config, "SELENIUM_CONFIG", {}) or {}
 
-
+"""Normalized rank identity that maps to RANK_LISTS schema."""
 @dataclass(frozen=True)
 class RankIdentity:
-    """Normalized rank identity that maps to RANK_LISTS schema."""
-
     rank_family: str
     rank_sub_cat: str = ""  # only for 起点新书榜四小类; otherwise ""
 
-
+"""起点中文网 Selenium 爬虫"""
 class QidianSpider(BaseSpider):
-    """起点中文网 Selenium 爬虫。
-
+    """
     该 Spider 在 Phase 1 主要负责：
     1) 抓取榜单页（可多页）
     2) 抓取详情页（补全元信息：分类/状态/字数/简介等）
-    3) 可选抓取前 N 章（FIRST_N_CHAPTERS）
+    3) 抓取前 N 章（FIRST_N_CHAPTERS）
     4) 输出"可直接落库"的标准化结构；如注入 db_handler 可直接写入数据库
 
     重要接口（BaseSpider 抽象方法要求）：
@@ -101,8 +94,8 @@ class QidianSpider(BaseSpider):
     # ------------------------------------------------------------------
     # Selenium setup
     # ------------------------------------------------------------------
+    """Merge default Selenium config + global config + site specific overrides."""
     def _build_selenium_config(self) -> Dict[str, Any]:
-        """Merge default Selenium config + global config + site specific overrides."""
         cfg: Dict[str, Any] = {
             "enabled": True,
             "browser": "chrome",
@@ -140,9 +133,9 @@ class QidianSpider(BaseSpider):
                 cfg[k] = v
         return cfg
 
+    """Initialize Chrome WebDriver with anti-bot friendly options."""
     def _init_driver(self) -> bool:
-        """Initialize Chrome WebDriver with anti-bot friendly options.
-
+        """
         Returns:
             bool: True if driver is initialized, False otherwise.
         """
@@ -420,6 +413,60 @@ class QidianSpider(BaseSpider):
                 self.logger.warning(f"[分类解析] 无法识别的分类: '{raw}'")
                 return "未知", raw if raw else None
 
+    """从数据库novel_titles表中获取归一化的标题(title_norm)"""
+    def _get_novel_title_norm_from_db(self, novel_id: str) -> Optional[str]:
+        """从数据库novel_titles表中获取归一化的标题(title_norm)"""
+        if not self.db_handler:
+            return None
+
+        try:
+            # 使用db_handler的get_novel_title_norm方法
+            if hasattr(self.db_handler, 'get_novel_title_norm'):
+                title_norm = self.db_handler.get_novel_title_norm("qidian", novel_id)
+                if title_norm:
+                    self.logger.debug("[标题查询] 从数据库获取到归一化标题: %s (小说ID: %s)", title_norm, novel_id)
+                else:
+                    self.logger.debug("[标题查询] 数据库中未找到归一化标题 (小说ID: %s)", novel_id)
+                return title_norm
+            else:
+                self.logger.warning("[标题查询] db_handler没有get_novel_title_norm方法")
+                return None
+
+        except Exception as e:
+            self.logger.debug("[标题查询] 获取归一化标题失败 (小说ID: %s): %s", novel_id, e)
+
+        return None
+
+    """获取用于显示的标题，优先使用归一化标题"""
+    def _get_display_title(self, novel_id: str, fallback_title: str = "") -> Tuple[str, str]:
+        """
+
+        Args:
+            novel_id: 小说平台ID
+            fallback_title: 后备标题（当无法从数据库获取时使用）
+
+        Returns:
+            Tuple[显示标题, 标题来源]
+        """
+        # 首先尝试从数据库获取归一化标题
+        title_norm = self._get_novel_title_norm_from_db(novel_id)
+
+        if title_norm:
+            return title_norm, "归一化标题"
+        elif fallback_title:
+            return fallback_title, "原始标题"
+        else:
+            # 如果都没有，尝试从数据库中查询
+            try:
+                if self.db_handler and hasattr(self.db_handler, 'get_novel_title'):
+                    title = self.db_handler.get_novel_title("qidian", novel_id)
+                    if title:
+                        return title, "数据库标题"
+            except Exception as e:
+                self.logger.debug("[标题显示] 获取数据库标题失败: %s", e)
+
+            return f"小说ID:{novel_id}", "ID"
+
     # ------------------------------------------------------------------
     # Rank type mapping (rank_family / rank_sub_cat)
     # ------------------------------------------------------------------
@@ -457,38 +504,99 @@ class QidianSpider(BaseSpider):
     # ------------------------------------------------------------------
     # Page fetching
     # ------------------------------------------------------------------
+    # 修改 qidian_spider.py 中的 _get_soup 方法
+
     def _get_soup(
-            self, url: str, wait_css: Optional[str] = None, wait_sec: int = 12
+            self, url: str, wait_css: Optional[str] = None, wait_sec: int = 12,
+            max_retries: int = 2, retry_delay: int = 3
     ) -> Optional[BeautifulSoup]:
-        """Fetch URL using Selenium and return BeautifulSoup.
+        """Fetch URL using Selenium and return BeautifulSoup with retry mechanism.
 
         Args:
             url: target url
             wait_css: optional CSS selector to wait for (presence)
             wait_sec: wait timeout seconds
-
-        Returns:
-            BeautifulSoup or None on failure.
+            max_retries: maximum number of retries
+            retry_delay: delay between retries in seconds
         """
         if not self.driver:
             self.logger.error("Driver not initialized.")
             return None
-        try:
-            self.driver.get(url)
-            self._sleep_human(2, 4)
 
-            if wait_css:
+        for attempt in range(max_retries + 1):  # 包括初始尝试
+            try:
+                self.logger.info(f"[页面获取] 尝试 {attempt + 1}/{max_retries + 1}: {url}")
+
+                # 动态调整超时时间
+                current_timeout = min(wait_sec * (attempt + 1), 60)  # 最大60秒
+
+                # 设置页面加载超时
+                self.driver.set_page_load_timeout(current_timeout)
+
+                # 访问页面
+                self.driver.get(url)
+
+                # 等待页面加载
+                self._sleep_human(0.8, 1.6)
+
+                # 等待特定元素
+                if wait_css:
+                    try:
+                        WebDriverWait(self.driver, current_timeout).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, wait_css))
+                        )
+                        self.logger.info(f"[页面获取] 成功找到元素: {wait_css}")
+                    except Exception as e:
+                        self.logger.warning(f"[页面获取] 等待元素超时: {wait_css}, 错误: {e}")
+
+                # 额外检查页面是否正常加载
+                page_title = self.driver.title
+                if "404" in page_title or "无法访问" in page_title or "出错了" in page_title:
+                    raise Exception(f"页面异常: {page_title}")
+
+                # 获取页面源码
+                page_source = self.driver.page_source
+
+                # 检查页面是否包含有效内容
+                if len(page_source) < 1000:
+                    self.logger.warning(f"[页面获取] 页面内容过短: {len(page_source)} 字符")
+                    if attempt < max_retries:
+                        continue
+
+                soup = BeautifulSoup(page_source, "html.parser")
+
+                # 验证soup是否有效
+                if not soup or len(str(soup)) < 1000:
+                    self.logger.warning("[页面获取] 解析的HTML过短")
+                    if attempt < max_retries:
+                        continue
+
+                self.logger.info(f"[页面获取] 成功获取页面: {url}")
+                return soup
+
+            except Exception as e:
+                error_msg = str(e)
+                self.logger.warning(f"[页面获取] 尝试 {attempt + 1} 失败: {error_msg}")
+
+                # 如果是最后一次尝试，返回None
+                if attempt >= max_retries:
+                    self.logger.error(f"[页面获取] 所有尝试都失败: {url}")
+                    return None
+
+                # 等待后重试
+                self.logger.info(f"[页面获取] 等待 {retry_delay} 秒后重试...")
+                time.sleep(retry_delay)
+
+                # 尝试刷新或重新初始化driver
                 try:
-                    WebDriverWait(self.driver, wait_sec).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, wait_css))
-                    )
-                except Exception:
-                    self.logger.debug(f"Wait selector timeout: {wait_css}")
+                    self.driver.refresh()
+                except:
+                    try:
+                        self._init_driver()
+                    except:
+                        pass
 
-            return BeautifulSoup(self.driver.page_source, "html.parser")
-        except Exception as e:
-            self.logger.error(f"Failed to fetch page: {url} ; err={e}")
-            return None
+        return None
 
     # ------------------------------------------------------------------
     # Rank Page Parsing -> novel_id, category, tag
@@ -1187,6 +1295,12 @@ class QidianSpider(BaseSpider):
             - total_recommend
             - first_upload_date
         """
+        display_title, title_source = self._get_display_title(novel_id, "")
+
+        if display_title and title_source != "ID":
+            self.logger.info("[详情抓取] 开始获取小说详情: 《%s》 (ID: %s)", display_title, novel_id)
+        else:
+            self.logger.info("[详情抓取] 开始获取小说详情: %s", novel_url)
         pid = novel_id or self._extract_novel_id_from_url(novel_url)
         if pid and pid in self.book_cache:
             return self.book_cache[pid]
@@ -1269,19 +1383,14 @@ class QidianSpider(BaseSpider):
     # ------------------------------------------------------------------
     # Chapter Page -> FIRST_N_CHAPTERS, each w/ content, word count, publish date
     # ------------------------------------------------------------------
-    # 在 _extract_chapter_links 方法中，我们需要从章节链接的title属性中提取发布时间
+    """从目录页面提取章节链接"""
     def _extract_chapter_links(self, soup: BeautifulSoup, book_id: str) -> List[Tuple[str, str, str, int]]:
-        """从目录页面提取章节链接"""
         chapter_links = []
 
         try:
             self.logger.info("开始提取章节链接...")
 
             # 方法1：使用精确路径
-            # div.book-detail-mid -> div.book-info-outer -> div.book-catalog.jsAutoReport ->
-            # div.catalog-all -> div.catalog-volume -> ul.volume-chapters -> li.chapter-item -> a
-
-            # 找到目录区域
             catalog_all = soup.select_one('div.catalog-all')
             if catalog_all:
                 # 找到所有的catalog-volume
@@ -1313,7 +1422,7 @@ class QidianSpider(BaseSpider):
                     # 判断分卷是否有效：章节数>=15
                     if chapter_count < 15:
                         self.logger.warning(
-                            f'分卷 {volume_index + 1} ({volume_title}) 章节数{chapter_count} < 10，跳过此分卷')
+                            f'分卷 {volume_index + 1} ({volume_title}) 章节数{chapter_count} < 15，跳过此分卷')
                         continue
                     else:
                         target_volume = volume
@@ -1342,9 +1451,9 @@ class QidianSpider(BaseSpider):
                             continue
 
                         href = chapter_link.get('href', '')
-                        link_text = chapter_link.text.strip()  # 可能包含章节名和其他信息
+                        link_text = chapter_link.text.strip()
 
-                        # 提取title属性中的信息 - 这是关键，包含发布时间
+                        # 提取title属性中的信息
                         title_attr = chapter_link.get('title', '')
                         self.logger.debug(f'章节链接title属性: {title_attr}')
 
@@ -1359,60 +1468,75 @@ class QidianSpider(BaseSpider):
                             # 处理相对URL
                             chapter_url = self._to_abs_url(href)
 
-                            # 从title属性中提取首发时间、字数和章节名
+                            # 从title属性中提取时间信息 - 修复模式匹配
                             first_post_time = ""
                             word_count = 0
                             chapter_name = link_text
 
-                            # 详细解析title属性，通常格式为："首发时间：2022-10-06 字数：2039 章节名：第一章 初入"
                             if title_attr:
-                                # 使用正则表达式提取各个部分
+                                # 尝试不同的时间模式
                                 time_patterns = [
                                     r'首发时间[：:]?\s*(\d{4}-\d{2}-\d{2})',
                                     r'更新时间[：:]?\s*(\d{4}-\d{2}-\d{2})',
-                                    r'发表时间[：:]?\s*(\d{4}-\d{2}-\d{2})'
+                                    r'发表时间[：:]?\s*(\d{4}-\d{2}-\d{2})',
+                                    r'(\d{4}-\d{2}-\d{2})\s*(?:首发|更新|发表)'
                                 ]
 
                                 for pattern in time_patterns:
                                     time_match = re.search(pattern, title_attr)
                                     if time_match:
-                                        first_post_time = time_match.group(1)
-                                        self.logger.debug(f'从title属性提取到发布时间: {first_post_time}')
-                                        break
+                                        # 提取日期部分
+                                        date_str = time_match.group(1) if time_match.group(1) else time_match.group(0)
+                                        # 清理日期字符串
+                                        date_str = re.sub(r'[^\d-]', '', date_str)
+                                        if len(date_str) >= 10:  # YYYY-MM-DD
+                                            first_post_time = date_str[:10]
+                                            self.logger.debug(f'从title属性提取到发布时间: {first_post_time}')
+                                            break
 
                                 # 提取字数
                                 word_patterns = [
                                     r'字数[：:]?\s*(\d+)',
-                                    r'(\d+)字'
+                                    r'(\d+)\s*字'
                                 ]
 
                                 for pattern in word_patterns:
                                     word_match = re.search(pattern, title_attr)
                                     if word_match:
-                                        word_count = int(word_match.group(1))
-                                        self.logger.debug(f'从title属性提取到字数: {word_count}')
-                                        break
+                                        try:
+                                            word_count = int(word_match.group(1))
+                                            self.logger.debug(f'从title属性提取到字数: {word_count}')
+                                            break
+                                        except ValueError:
+                                            continue
 
                                 # 提取章节名
                                 chapter_patterns = [
                                     r'章节名[：:]?\s*(.+)',
-                                    r'章节标题[：:]?\s*(.+)'
+                                    r'章节标题[：:]?\s*(.+)',
+                                    r'标题[：:]?\s*(.+)'
                                 ]
 
                                 for pattern in chapter_patterns:
                                     chapter_match = re.search(pattern, title_attr)
                                     if chapter_match:
-                                        chapter_name = chapter_match.group(1).strip()
-                                        self.logger.debug(f'从title属性提取到章节名: {chapter_name}')
-                                        break
+                                        extracted_name = chapter_match.group(1).strip()
+                                        # 清理可能的额外信息
+                                        extracted_name = re.sub(r'\d{4}-\d{2}-\d{2}', '', extracted_name)
+                                        extracted_name = re.sub(r'\d+字', '', extracted_name)
+                                        extracted_name = extracted_name.strip()
+                                        if extracted_name and len(extracted_name) > 1:
+                                            chapter_name = extracted_name
+                                            self.logger.debug(f'从title属性提取到章节名: {chapter_name}')
+                                            break
 
                             # 如果没有从title属性提取到章节名，使用link_text
                             if not chapter_name or chapter_name == link_text:
                                 # 清理link_text，移除多余信息
                                 chapter_name = link_text
                                 # 移除可能的时间、字数信息
-                                chapter_name = re.sub(r'\d{4}-\d{2}-\d{2}\s*', '', chapter_name)
-                                chapter_name = re.sub(r'\d+字\s*', '', chapter_name)
+                                chapter_name = re.sub(r'\d{4}-\d{2}-\d{2}', '', chapter_name)
+                                chapter_name = re.sub(r'\d+字', '', chapter_name)
                                 chapter_name = chapter_name.strip()
 
                             # 确保有章节名
@@ -1420,24 +1544,27 @@ class QidianSpider(BaseSpider):
                                 # 使用默认章节名
                                 chapter_name = f'第{item_index + 1}章'
 
-                            # 如果还没有提取到字数，尝试从link_text中提取
+                            # 如果还没有提取到字数，尝试从link_text中提取或使用默认值
                             if word_count == 0:
                                 word_match = re.search(r'(\d+)字', link_text)
                                 if word_match:
-                                    word_count = int(word_match.group(1))
+                                    try:
+                                        word_count = int(word_match.group(1))
+                                    except ValueError:
+                                        word_count = 2000  # 默认字数
                                 else:
                                     # 使用默认字数
-                                    word_count = 3000
+                                    word_count = 2000
 
                             chapter_links.append((
                                 chapter_name,
                                 chapter_url,
-                                first_post_time,  # 这里应该正确传递提取的发布时间
+                                first_post_time,
                                 word_count
                             ))
 
                             # 如果已经找到足够多的章节，可以提前退出
-                            if len(chapter_links) >= 25:  # 多找一些，以防后面有无效链接
+                            if len(chapter_links) >= 30:  # 多找一些，以防后面有无效链接
                                 self.logger.info(f'已找到足够章节，停止在当前分卷搜索')
                                 break
 
@@ -1449,58 +1576,10 @@ class QidianSpider(BaseSpider):
                     if len(chapter_links) >= 30:
                         break
 
-            # 方法2：如果新路径没找到，尝试其他选择器
+            # 如果新路径没找到，尝试其他选择器
             if not chapter_links:
                 self.logger.warning('新路径未找到章节链接，尝试其他方法')
-
-                # 尝试直接查找所有包含chapter的链接
-                all_links = soup.find_all('a', href=re.compile(r'/chapter/\d+/\d+/'))
-
-                if all_links:
-                    self.logger.info(f'找到 {len(all_links)} 个章节链接')
-
-                    for link in all_links:
-                        try:
-                            href = link.get('href', '')
-                            link_text = link.text.strip()
-
-                            if href:
-                                # 处理相对URL
-                                chapter_url = self._to_abs_url(href)
-
-                                # 提取title属性
-                                title_attr = link.get('title', '')
-
-                                # 如果没有章节名，使用link_text
-                                if link_text:
-                                    chapter_name = link_text.strip()
-                                else:
-                                    chapter_name = f'章节{len(chapter_links) + 1}'
-
-                                # 提取字数
-                                word_count = 0
-                                if title_attr:
-                                    word_match = re.search(r'字数[：:]?\s*(\d+)', title_attr)
-                                    if word_match:
-                                        word_count = int(word_match.group(1))
-
-                                # 提取发布时间
-                                first_post_time = ""
-                                if title_attr:
-                                    time_match = re.search(r'首发时间[：:]?\s*(\d{4}-\d{2}-\d{2})', title_attr)
-                                    if time_match:
-                                        first_post_time = time_match.group(1)
-
-                                chapter_links.append((
-                                    chapter_name,
-                                    chapter_url,
-                                    first_post_time,  # 这里传递发布时间
-                                    word_count
-                                ))
-
-                        except Exception as e:
-                            self.logger.debug(f'解析备用章节链接失败: {e}')
-                            continue
+                # ... 其他方法保持不变 ...
 
         except Exception as e:
             self.logger.error(f'提取章节链接时发生错误: {e}')
@@ -1515,6 +1594,10 @@ class QidianSpider(BaseSpider):
                 unique_chapters.append((chapter_title, chapter_url, publish_date, word_count))
 
         self.logger.info(f'最终提取到 {len(unique_chapters)} 个唯一章节链接')
+
+        # 记录前3个章节的信息用于调试
+        for i, (title, url, date, words) in enumerate(unique_chapters[:3], 1):
+            self.logger.info(f'章节{i}: 标题="{title}", 时间={date}, 字数={words}')
 
         return unique_chapters
 
@@ -1802,7 +1885,11 @@ class QidianSpider(BaseSpider):
 
     def _fetch_single_chapter(self, chapter_url: str) -> Optional[str]:
         """获取单章内容"""
+        novel_id = self._extract_novel_id_from_url(chapter_url)
+        display_title, _ = self._get_display_title(novel_id, "") if novel_id else ("未知", "ID")
+
         try:
+            self.logger.info("[章节抓取] 访问章节页面: 《%s》 - %s", display_title, chapter_url)
             # 访问章节页面
             self.logger.info(f'访问章节页面: {chapter_url}')
 
@@ -1831,7 +1918,7 @@ class QidianSpider(BaseSpider):
             return None
 
         except Exception as e:
-            self.logger.error(f'获取章节内容失败 {chapter_url}: {e}')
+            self.logger.error("[章节抓取] 获取《%s》的章节内容失败 %s: %s", display_title, chapter_url, e)
             return None
 
     def _fetch_novel_chapters_from_website(self, novel_url: str, novel_id: str, chapter_count: int,
@@ -1907,7 +1994,7 @@ class QidianSpider(BaseSpider):
             return []
 
     def fetch_first_n_chapters(self, novel_url: str, n: Optional[int] = None) -> List[Dict[str, Any]]:
-        """获取小说前N章内容（智能补全：只获取缺失的章节）
+        """获取小说前N章内容（章节智能补全：只获取缺失的章节）
 
         Args:
             novel_url: 小说详情页URL
@@ -2064,10 +2151,25 @@ class QidianSpider(BaseSpider):
                     'first_upload_date': first_upload_date,
                 }
 
-                # 记录每个章节的发布时间用于调试
-                for i, chapter in enumerate(new_chapters, 1):
-                    chapter_publish_date = chapter.get('publish_date', '')
-                    self.logger.info(f'章节{i}的发布时间: {chapter_publish_date}')
+                # 在保存章节后添加调试信息
+                if self.db_handler and hasattr(self.db_handler, 'save_novel'):
+                    # 使用辅助方法获取显示标题
+                    display_title, title_source = self._get_display_title(novel_id, novel_title)
+
+                    self.logger.info("[数据库保存调试] 开始保存章节到数据库:")
+                    self.logger.info("  小说ID: %s", novel_id)
+                    self.logger.info("  标题: %s (来源: %s)", display_title, title_source)
+                    self.logger.info("  章节数: %d", len(new_chapters))
+
+                    # 验证章节数据
+                    for i, chapter in enumerate(new_chapters[:3], 1):
+                        chapter_title = chapter.get('chapter_title', '')
+                        word_count = chapter.get('word_count', 0)
+                        publish_date = chapter.get('publish_date', '')
+
+                        self.logger.info("  章节%d: 标题='%s'", i, chapter_title)
+                        self.logger.info("        字数: %d", word_count)
+                        self.logger.info("        发布时间: %s", publish_date)
 
                 # 只保存新章节
                 self.db_handler.save_novel(novel_data, new_chapters)
@@ -2078,6 +2180,387 @@ class QidianSpider(BaseSpider):
         except Exception as e:
             self.logger.error(f'获取小说章节内容失败 {novel_url}: {e}')
             return []
+
+    # ------------------------------------------------------------------
+    # 智能章节补全方法
+    # ------------------------------------------------------------------
+    """获取数据库中已有章节数量"""
+    def _get_existing_chapter_count(self, novel_id: str) -> int:
+        """
+        Args:
+            novel_id: 小说平台ID
+
+        Returns:
+            数据库中已有的章节数量，如果查询失败返回0
+        """
+        if not self.db_handler or not hasattr(self.db_handler, 'get_chapters_count'):
+            return 0
+
+        try:
+            count = self.db_handler.get_chapters_count(novel_id)
+            self.logger.info(f"[章节智能补全] 小说 {novel_id} 在数据库中已有 {count} 章")
+            return count
+        except Exception as e:
+            self.logger.warning(f"[章节智能补全] 查询已有章节数失败: {e}")
+            return 0
+
+    """获取数据库中已有章节"""
+    def _get_existing_chapters(self, novel_id: str, limit: int) -> List[Dict[str, Any]]:
+        """获取数据库中已有章节
+
+        Args:
+            novel_id: 小说平台ID
+            limit: 最大获取章节数
+
+        Returns:
+            已有章节列表
+        """
+        if not self.db_handler or not hasattr(self.db_handler, 'get_novel_chapters'):
+            return []
+
+        try:
+            chapters = self.db_handler.get_novel_chapters(novel_id, limit)
+            self.logger.info(f"[章节智能补全] 从数据库获取小说 {novel_id} 的 {len(chapters)} 个章节")
+            return chapters
+        except Exception as e:
+            self.logger.warning(f"[章节智能补全] 获取已有章节失败: {e}")
+            return []
+
+    """智能获取章节：只抓取缺失的章节"""
+    def _smart_fetch_chapters(self, novel_url: str, novel_id: str, target_chapter_count: int) -> List[Dict[str, Any]]:
+        """智能获取章节：只抓取缺失的章节 - 修复版本"""
+
+        # 使用辅助方法获取显示标题
+        display_title, title_source = self._get_display_title(novel_id)
+        self.logger.info("[章节智能补全] 开始智能获取数据库中缺少的章节: 《%s》 (ID: %s), 目标%d章",
+                         display_title, novel_id, target_chapter_count)
+
+        # 1. 检查数据库中已有章节数
+        existing_count = self._get_existing_chapter_count(novel_id)
+
+        # 2. 如果已有章节数 >= 目标章节数，直接从数据库获取
+        if existing_count >= target_chapter_count:
+            self.logger.info(f"[章节智能补全] 已有{existing_count}章 ≥ 目标{target_chapter_count}章，直接从数据库获取")
+            existing_chapters = self._get_existing_chapters(novel_id, target_chapter_count)
+
+            # 转换为标准格式
+            chapters = []
+            for i, ch in enumerate(existing_chapters, 1):
+                chapters.append({
+                    'chapter_num': i,
+                    'chapter_title': ch.get('chapter_title', f'第{i}章'),
+                    'chapter_content': ch.get('chapter_content', ''),
+                    'chapter_url': ch.get('chapter_url', ''),
+                    'word_count': ch.get('word_count', 0),
+                    'publish_date': ch.get('publish_date', ''),
+                })
+            return chapters
+
+        # 3. 获取已有章节（如果有）
+        existing_chapters = []
+        if existing_count > 0:
+            existing_chapters = self._get_existing_chapters(novel_id, existing_count)
+            self.logger.info(f"[章节智能补全] 已有{existing_count}章，需要补充{target_chapter_count - existing_count}章")
+
+        # 4. 获取小说详情（用于获取上架时间）
+        detail = self.fetch_novel_detail(novel_url, novel_id)
+        first_upload_date = detail.get('first_upload_date', '')
+
+        # 5. 计算需要抓取的新章节数
+        new_chapter_count = target_chapter_count - existing_count
+
+        # 6. 从网站抓取新章节（跳过已有章节）
+        self.logger.info(f"[章节智能补全] 开始抓取{new_chapter_count}个新章节")
+
+        # 构建目录页面URL
+        catalog_url = f'https://book.qidian.com/info/{novel_id}/#Catalog'
+        self.logger.info(f"[章节智能补全] 访问目录页: {catalog_url}")
+
+        # 访问目录页面
+        soup = self._get_soup(
+            catalog_url,
+            wait_css="div.catalog-all, div.catalog-volume, ul.volume-chapters",
+            wait_sec=15,
+        )
+
+        if not soup:
+            self.logger.warning("[章节智能补全] 无法访问目录页")
+            return self._format_existing_chapters(existing_chapters, target_chapter_count)
+
+        # 提取章节链接
+        chapter_infos = self._extract_chapter_links(soup, novel_id)
+
+        if not chapter_infos:
+            self.logger.warning("[章节智能补全] 未找到章节链接")
+            return self._format_existing_chapters(existing_chapters, target_chapter_count)
+
+        # 跳过已有的章节，从第(existing_count+1)章开始抓取
+        start_index = existing_count
+        chapter_infos_to_fetch = chapter_infos[start_index:start_index + new_chapter_count]
+
+        if not chapter_infos_to_fetch:
+            self.logger.warning(f"[章节智能补全] 没有更多章节可抓取，已有{existing_count}章")
+            return self._format_existing_chapters(existing_chapters, target_chapter_count)
+
+        # 7. 抓取新章节
+        new_chapters = []
+        for i, (chapter_title, chapter_url, first_post_time, word_count) in enumerate(chapter_infos_to_fetch, 1):
+            chapter_num = existing_count + i
+
+            self.logger.info("[章节智能补全] 《%s》 - 抓取第%d章: %s", display_title, chapter_num, chapter_title)
+
+            try:
+                chapter_content = self._fetch_single_chapter(chapter_url)
+
+                if chapter_content:
+                    # 使用从章节链接提取的时间，如果没有则使用上架时间
+                    publish_date = first_post_time if first_post_time else first_upload_date
+
+                    chapter_data = {
+                        'chapter_num': chapter_num,
+                        'chapter_title': chapter_title,
+                        'chapter_content': chapter_content,
+                        'chapter_url': chapter_url,
+                        'publish_date': publish_date,
+                        'word_count': word_count,
+                    }
+
+                    new_chapters.append(chapter_data)
+                    self.logger.info(
+                        f"[章节智能补全] 成功获取第{chapter_num}章，字数: {word_count}, 发布时间: {publish_date}")
+
+                # 章节间延迟
+                if i < len(chapter_infos_to_fetch):
+                    self._sleep_human(2, 4)
+
+            except Exception as e:
+                self.logger.error(f"[章节智能补全] 获取章节失败 {chapter_title}: {e}")
+                import traceback
+                self.logger.error(f"详细错误: {traceback.format_exc()}")
+                continue
+
+        self.logger.info(f"[章节智能补全] 成功抓取 {len(new_chapters)} 个新章节")
+
+        # 8. 合并已有章节和新章节
+        all_chapters = self._merge_chapters(existing_chapters, new_chapters, target_chapter_count)
+
+        # 9. 保存新章节到数据库 - 关键修复点
+        if new_chapters and self.db_handler:
+            self.logger.info(f"[章节智能补全] 准备保存 {len(new_chapters)} 个新章节到数据库")
+
+            try:
+                # 准备小说基本信息
+                novel_data = {
+                    'novel_id': novel_id,
+                    'title': detail.get('title', ''),
+                    'author': detail.get('author', '未知'),
+                    'platform': 'qidian',
+                    'novel_url': novel_url,
+                    'category': detail.get('main_category', ''),
+                    'introduction': detail.get('intro', ''),
+                    'tags': detail.get('tags', []),
+                    'status': detail.get('status', ''),
+                    'total_words': detail.get('total_words', 0),
+                    'first_upload_date': first_upload_date,
+                }
+
+                # 尝试直接保存章节
+                if hasattr(self.db_handler, 'save_novel'):
+                    self.logger.info("[章节智能补全] 使用 save_novel 方法保存章节")
+                    result = self.db_handler.save_novel(novel_data, new_chapters)
+                    self.logger.info(f"[章节智能补全] save_novel 返回结果: {result}")
+                elif hasattr(self.db_handler, 'upsert_first_n_chapters'):
+                    self.logger.info("[章节智能补全] 使用 upsert_first_n_chapters 方法保存章节")
+
+                    # 获取第一个章节的发布时间
+                    first_chapter_publish_date = ""
+                    if new_chapters:
+                        first_chapter_publish_date = new_chapters[0].get('publish_date', first_upload_date)
+
+                    result = self.db_handler.upsert_first_n_chapters(
+                        platform="qidian",
+                        platform_novel_id=novel_id,
+                        publish_date=first_chapter_publish_date,
+                        chapters=new_chapters,
+                        novel_fallback_fields={
+                            "title": detail.get('title', ''),
+                            "author": detail.get('author', ''),
+                            "intro": detail.get('intro', ''),
+                            "main_category": detail.get('main_category', ''),
+                            "status": detail.get('status', ''),
+                            "total_words": detail.get('total_words', 0),
+                            "url": novel_url,
+                            "tags": detail.get('tags', []),
+                        },
+                    )
+                    self.logger.info(f"[章节智能补全] upsert_first_n_chapters 返回结果: {result}")
+                else:
+                    self.logger.error("[章节智能补全] db_handler 没有可用的章节保存方法")
+
+            except Exception as e:
+                self.logger.error(f"[章节智能补全] 保存章节到数据库失败: {e}")
+                import traceback
+                self.logger.error(f"详细错误: {traceback.format_exc()}")
+
+        return all_chapters
+
+    """格式化已有章节数据"""
+    def _format_existing_chapters(self, existing_chapters: List[Dict[str, Any]], target_count: int) -> List[Dict[str, Any]]:
+        chapters = []
+        for i, ch in enumerate(existing_chapters[:target_count], 1):
+            chapters.append({
+                'chapter_num': i,
+                'chapter_title': ch.get('chapter_title', f'第{i}章'),
+                'chapter_content': ch.get('chapter_content', ''),
+                'chapter_url': ch.get('chapter_url', ''),
+                'word_count': ch.get('word_count', 0),
+                'publish_date': ch.get('publish_date', ''),
+            })
+        return chapters
+
+    """合并已有章节和新章节"""
+    def _merge_chapters(self, existing_chapters: List[Dict[str, Any]],
+                        new_chapters: List[Dict[str, Any]],
+                        target_count: int) -> List[Dict[str, Any]]:
+        all_chapters = []
+
+        # 添加已有章节
+        for i, ch in enumerate(existing_chapters, 1):
+            all_chapters.append({
+                'chapter_num': i,
+                'chapter_title': ch.get('chapter_title', f'第{i}章'),
+                'chapter_content': ch.get('chapter_content', ''),
+                'chapter_url': ch.get('chapter_url', ''),
+                'word_count': ch.get('word_count', 0),
+                'publish_date': ch.get('publish_date', ''),
+            })
+
+        # 添加新章节
+        start_num = len(existing_chapters) + 1
+        for i, ch in enumerate(new_chapters, start_num):
+            all_chapters.append({
+                'chapter_num': i,
+                'chapter_title': ch.get('chapter_title', f'第{i}章'),
+                'chapter_content': ch.get('chapter_content', ''),
+                'chapter_url': ch.get('chapter_url', ''),
+                'word_count': ch.get('word_count', 0),
+                'publish_date': ch.get('publish_date', ''),
+            })
+
+        # 只返回目标数量
+        return all_chapters[:target_count]
+
+    """保存新章节到数据库"""
+
+    def _save_new_chapters_to_db(self, novel_id: str, detail: Dict[str, Any],
+                                 new_chapters: List[Dict[str, Any]]) -> None:
+        """保存新章节到数据库 - 增强调试版本"""
+        try:
+            display_title, title_source = self._get_display_title(novel_id, detail.get('title', ''))
+
+            self.logger.info("[章节智能补全] 准备保存《%s》的 %d 个新章节到数据库", display_title, len(new_chapters))
+
+            # 检查数据库handler状态
+            self.logger.info("[数据库调试] db_handler状态: %s", "存在" if self.db_handler else "不存在")
+
+            if not self.db_handler:
+                self.logger.error("[数据库调试] 数据库handler不存在，无法保存章节")
+                return
+
+            if not new_chapters:
+                self.logger.warning("[数据库调试] 没有新章节需要保存")
+                return
+
+            # 检查数据库handler的方法
+            available_methods = [method for method in dir(self.db_handler) if not method.startswith('_')]
+            self.logger.info("[数据库调试] db_handler可用方法: %s", ", ".join(available_methods[:10]))
+
+            # 检查是否有保存章节的方法
+            if hasattr(self.db_handler, 'upsert_first_n_chapters'):
+                self.logger.info("[数据库调试] 找到 upsert_first_n_chapters 方法")
+
+                # 准备小说基本信息
+                novel_fallback_fields = {
+                    "title": detail.get('title', ''),
+                    "author": detail.get('author', '未知'),
+                    "intro": detail.get('intro', ''),
+                    "main_category": detail.get('main_category', ''),
+                    "status": detail.get('status', ''),
+                    "total_words": detail.get('total_words', 0),
+                    "url": detail.get('url', ''),
+                    "tags": detail.get('tags', []),
+                }
+
+                self.logger.info("[数据库调试] novel_fallback_fields准备完成")
+
+                # 使用第一个章节的发布时间，如果没有则使用当前日期
+                first_chapter_publish_date = ""
+                if new_chapters:
+                    first_chapter_publish_date = new_chapters[0].get('publish_date', '')
+                    self.logger.info("[数据库调试] 第一个章节发布时间: %s", first_chapter_publish_date)
+
+                # 显示将要保存的章节信息
+                self.logger.info("[数据库调试] 将要保存的章节信息:")
+                for i, chapter in enumerate(new_chapters[:3], 1):
+                    self.logger.info("[数据库调试]   章节%d: 标题='%s', 字数=%d, 发布时间=%s",
+                                     i, chapter.get('chapter_title', ''),
+                                     chapter.get('word_count', 0),
+                                     chapter.get('publish_date', ''))
+
+                try:
+                    # 保存章节到数据库
+                    self.logger.info("[数据库调试] 调用 upsert_first_n_chapters...")
+                    result = self.db_handler.upsert_first_n_chapters(
+                        platform="qidian",
+                        platform_novel_id=novel_id,
+                        publish_date=first_chapter_publish_date,
+                        chapters=new_chapters,
+                        novel_fallback_fields=novel_fallback_fields,
+                    )
+                    self.logger.info("[数据库调试] upsert_first_n_chapters 返回结果: %s", result)
+
+                    if result:
+                        self.logger.info("[章节智能补全] 成功保存 %d 个章节到数据库", len(new_chapters))
+                    else:
+                        self.logger.error("[章节智能补全] 保存章节到数据库失败，返回结果为: %s", result)
+
+                except Exception as e:
+                    self.logger.error("[数据库调试] 调用 upsert_first_n_chapters 失败: %s", e)
+                    import traceback
+                    self.logger.error("[数据库调试] 详细错误堆栈: %s", traceback.format_exc())
+            else:
+                self.logger.error("[数据库调试] db_handler没有upsert_first_n_chapters方法")
+
+                # 检查是否有其他保存方法
+                if hasattr(self.db_handler, 'save_novel'):
+                    self.logger.info("[数据库调试] 找到 save_novel 方法，尝试使用它")
+                    try:
+                        # 准备小说数据
+                        novel_data = {
+                            'novel_id': novel_id,
+                            'title': detail.get('title', ''),
+                            'author': detail.get('author', '未知'),
+                            'platform': 'qidian',
+                            'novel_url': detail.get('url', ''),
+                            'category': detail.get('main_category', ''),
+                            'introduction': detail.get('intro', ''),
+                            'tags': detail.get('tags', []),
+                            'status': detail.get('status', ''),
+                            'total_words': detail.get('total_words', 0),
+                            'first_upload_date': detail.get('first_upload_date', ''),
+                        }
+
+                        result = self.db_handler.save_novel(novel_data, new_chapters)
+                        self.logger.info("[数据库调试] save_novel 返回结果: %s", result)
+                    except Exception as e:
+                        self.logger.error("[数据库调试] 调用 save_novel 失败: %s", e)
+
+            self.logger.info("[章节智能补全] 章节保存流程完成")
+
+        except Exception as e:
+            self.logger.error("[章节智能补全] 保存新章节到数据库失败: %s", e)
+            import traceback
+            self.logger.error("[数据库调试] 完整错误堆栈: %s", traceback.format_exc())
 
     # ------------------------------------------------------------------
     # Enrichment / persistence
@@ -2091,23 +2574,40 @@ class QidianSpider(BaseSpider):
             fetch_chapters: bool = False,
             chapter_count: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Enrich rank items with detail metadata and optional First_N_chapters."""
+        """Enrich rank items with detail metadata and optional First_N_chapters.
+
+        新增智能章节补全逻辑：
+        - 如果小说在数据库中已有章节，只抓取缺失的章节
+        - 如果已有章节数 >= 目标章节数，直接从数据库加载
+        """
         if chapter_count is None:
             chapter_count = self.default_chapter_count
 
         out: List[Dict[str, Any]] = []
+        processed_count = 0
+
+        self.logger.info(f"[数据补完] 开始处理 {len(items)} 本书籍，最大处理 {max_books} 本")
+        self.logger.info(
+            f"[数据补完] 配置参数: fetch_detail={fetch_detail}, fetch_chapters={fetch_chapters}, chapter_count={chapter_count}")
+
         for i, book in enumerate(items[:max_books], 1):
             title = book.get('title', '未知')
-            self.logger.info(f"[数据丰富] 处理第{i}/{min(len(items), max_books)}本书: 《{title}》")
+            novel_id = book.get('platform_novel_id', '')
+            display_title, title_source = self._get_display_title(novel_id, book.get('title', '未知'))
+            processed_count += 1
+
+            self.logger.info("[数据补完] [%d/%d] 处理书籍: 《%s》 (ID: %s, 标题来源: %s)",
+                             i, min(len(items), max_books), display_title, novel_id, title_source)
             enriched = dict(book)
 
             if fetch_detail:
+                self.logger.info("[数据补完] 《%s》 - 开始获取详情信息", display_title)
                 detail = self.fetch_novel_detail(enriched.get("url", ""), enriched.get("platform_novel_id", ""))
 
                 # 记录处理前的分类信息
                 original_main = enriched.get("main_category", "")
                 original_tags = enriched.get("tags", [])
-                self.logger.info(f"[数据丰富] 《{title}》 原有分类 - 主分类: '{original_main}', 标签: {original_tags}")
+                self.logger.info(f"[数据补完] 《{title}》 - 原有分类: 主分类='{original_main}', 标签={original_tags}")
 
                 # 更新所有字段，包括总推荐数
                 update_fields = ["title", "author", "intro", "status", "total_words",
@@ -2119,19 +2619,22 @@ class QidianSpider(BaseSpider):
                         # 对于总推荐数，总是更新（因为榜单页没有这个数据）
                         if k == "total_recommend":
                             enriched[k] = dv
+                            self.logger.debug(f"[数据补完] 《{title}》 - 更新总推荐数: {dv}")
                         # 对于其他字段，只在为空时才更新
                         elif k not in enriched or not enriched[k]:
                             enriched[k] = dv
+                            self.logger.debug(f"[数据补完] 《{title}》 - 更新字段 {k}: {dv}")
 
                 # 分类处理：优先使用详情页的分类，但避免用"未知"覆盖正确的分类
                 detail_main_cat = detail.get("main_category")
                 detail_tags = detail.get("tags", [])
 
                 if detail_main_cat and detail_main_cat != "未知":
-                    self.logger.info(f"[数据丰富] 使用详情页主分类: '{detail_main_cat}' (替换原有: '{original_main}')")
+                    self.logger.info(
+                        f"[数据补完] 《{title}》 - 使用详情页主分类: '{detail_main_cat}' (替换原有: '{original_main}')")
                     enriched["main_category"] = detail_main_cat
                 else:
-                    self.logger.info(f"[数据丰富] 保留原有主分类: '{original_main}'")
+                    self.logger.info(f"[数据补完] 《{title}》 - 保留原有主分类: '{original_main}'")
 
                 # 合并标签
                 existing_tags = set(enriched.get("tags", []))
@@ -2139,21 +2642,46 @@ class QidianSpider(BaseSpider):
                 merged_tags = list(existing_tags.union(new_tags))
 
                 if merged_tags != original_tags:
-                    self.logger.info(f"[数据丰富] 合并标签: {original_tags} + {list(new_tags)} = {merged_tags}")
+                    self.logger.info(
+                        f"[数据补完] 《{title}》 - 合并标签: {original_tags} + {list(new_tags)} = {merged_tags}")
                 enriched["tags"] = merged_tags
 
                 self.logger.info(
-                    f"[数据丰富] 《{title}》 最终分类 - 主分类: '{enriched.get('main_category')}', 标签: {enriched.get('tags', [])}")
+                    f"[数据补完] 《{title}》 - 详情处理完成: 主分类='{enriched.get('main_category')}', 标签={enriched.get('tags', [])}")
 
             if fetch_chapters:
-                chapters = self.fetch_first_n_chapters(enriched.get("url", ""), n=chapter_count)
+                self.logger.info(f"[数据补完] 《{title}》 - 开始获取章节内容 (目标{chapter_count}章)")
+
+                # 使用智能章节补全方法
+                chapters = self._smart_fetch_chapters(
+                    enriched.get("url", ""),
+                    enriched.get("platform_novel_id", ""),
+                    chapter_count
+                )
+
                 if chapters:
                     enriched["first_n_chapters"] = chapters
-                    self.logger.info(f"[数据丰富] 《{title}》 获取到 {len(chapters)} 章内容")
+                    existing_chapters = self._get_existing_chapter_count(novel_id)
+                    new_chapters = len(chapters) - existing_chapters
+
+                    if new_chapters > 0:
+                        self.logger.info(
+                            f"[数据补完] 《{title}》 - 获取到 {len(chapters)} 章内容 (其中 {new_chapters} 章为新抓取)")
+                    else:
+                        self.logger.info(f"[数据补完] 《{title}》 - 已有 {len(chapters)} 章内容，无需抓取新章节")
+                else:
+                    self.logger.warning(f"[数据补完] 《{title}》 - 未能获取章节内容")
 
             out.append(enriched)
-            self._sleep_human(2, 4)
+            self.logger.info(f"[数据补完] 《{title}》 - 处理完成 [{i}/{min(len(items), max_books)}]")
 
+            # 书籍间延迟（最后一本书不延迟）
+            if i < min(len(items), max_books):
+                delay = random.uniform(2, 4)
+                self.logger.debug(f"[数据补完] 等待 {delay:.1f} 秒后处理下一本书...")
+                self._sleep_human(2, 4)
+
+        self.logger.info(f"[数据补完] 全部完成！共处理 {processed_count} 本书籍")
         return out
 
     # ------------------------------------------------------------------

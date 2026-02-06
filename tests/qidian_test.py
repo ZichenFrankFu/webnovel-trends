@@ -6,6 +6,7 @@ import time
 import sqlite3
 import argparse
 from datetime import datetime, timedelta
+from typing import Dict, Any
 
 
 def _project_root() -> str:
@@ -15,46 +16,25 @@ def _project_root() -> str:
 
 def _ensure_clean_dirs():
     """清理旧的测试产物并创建必要的输出目录"""
+    print("\n" + "=" * 80)
+    print("测试环境准备")
+    print("=" * 80)
 
     # 1. 只清除 qidian_test.db，保留其他数据库文件
-    qidian_db_path = "qidian_test.db"
+    qidian_db_path = "test_output/qidian_test.db"
     if os.path.exists(qidian_db_path):
         try:
             os.remove(qidian_db_path)
-            print(f"[清理] 已删除: {qidian_db_path}")
+            print(f"[清理] 已删除测试数据库: {qidian_db_path}")
         except Exception as e:
             print(f"[清理] 删除 {qidian_db_path} 失败: {e}")
+    else:
+        print(f"[清理] 测试数据库不存在: {qidian_db_path}")
 
-    # 2. 处理 outputs/debug 目录，将其移动到 test_output/debug
-    source_debug_dir = "outputs/debug"
-    target_debug_dir = "test_output/debug"
-
-    if os.path.exists(source_debug_dir):
-        try:
-            # 确保目标目录的父目录存在
-            os.makedirs("test_output", exist_ok=True)
-
-            # 如果目标目录已存在，先删除
-            if os.path.exists(target_debug_dir):
-                shutil.rmtree(target_debug_dir)
-                print(f"[清理] 已删除旧的目标目录: {target_debug_dir}")
-
-            # 移动目录
-            shutil.move(source_debug_dir, target_debug_dir)
-            print(f"[移动] 已将 {source_debug_dir} 移动到 {target_debug_dir}")
-
-            # 删除空的原目录
-            parent_dir = os.path.dirname(source_debug_dir)
-            if os.path.exists(parent_dir) and not os.listdir(parent_dir):
-                os.rmdir(parent_dir)
-                print(f"[清理] 已删除空目录: {parent_dir}")
-
-        except Exception as e:
-            print(f"[移动] 移动 {source_debug_dir} 到 {target_debug_dir} 失败: {e}")
-
-    # 3. 确保必要的目录存在
+   # 2. 确保必要的目录存在
     os.makedirs("test_output", exist_ok=True)
     os.makedirs("test_output/debug", exist_ok=True)
+    print(f"[目录] 确保目录存在: test_output/, test_output/debug/")
 
 
 def _open_sqlite(db_path: str) -> sqlite3.Connection:
@@ -66,27 +46,45 @@ def _open_sqlite(db_path: str) -> sqlite3.Connection:
 
 def _print_table_counts(db):
     """Print all table counts using db.get_table_counts()."""
-    counts = db.get_table_counts()
-    print("\n[db] 数据库统计:")
-    for k in [
-        "novels",
-        "novel_titles",
-        "tags",
-        "novel_tag_map",
-        "rank_lists",
-        "rank_snapshots",
-        "rank_entries",
-        "first_n_chapters",
-    ]:
-        print(f"  - {k}: {counts.get(k, 0)}")
+    print("\n" + "-" * 60)
+    print("数据库统计")
+    print("-" * 60)
+
+    try:
+        counts = db.get_table_counts()
+        table_mapping = {
+            "novels": "小说基本信息",
+            "novel_titles": "小说标题记录",
+            "tags": "标签信息",
+            "novel_tag_map": "小说标签映射",
+            "rank_lists": "榜单列表",
+            "rank_snapshots": "榜单快照",
+            "rank_entries": "榜单条目",
+            "first_n_chapters": "前N章内容",
+        }
+
+        for k, display_name in table_mapping.items():
+            count = counts.get(k, 0)
+            status = "SUCCESS" if count > 0 else "FAIL"
+            print(f"  {status} {display_name:<15}: {count:>4} 条记录")
+
+        total = sum(counts.get(k, 0) for k in table_mapping.keys())
+        print(f"\n 总计: {total} 条记录")
+
+    except Exception as e:
+        print(f"获取数据库统计失败: {e}")
 
 
 def _peek_some_rows(db_path: str):
     """Show a few rows from key tables to verify inserts."""
+    print("\n" + "-" * 80)
+    print("数据库内容预览")
+    print("-" * 80)
+
     conn = _open_sqlite(db_path)
     cur = conn.cursor()
 
-    print("\n[db] 榜单列表 (rank_lists):")
+    print("\n榜单列表 (rank_lists):")
     cur.execute(
         """
         SELECT rank_list_id, platform, rank_family, rank_sub_cat, source_url
@@ -95,10 +93,14 @@ def _peek_some_rows(db_path: str):
         LIMIT 5
         """
     )
-    for r in cur.fetchall():
+    rows = cur.fetchall()
+    if not rows:
+        print("(暂无数据)")
+    for r in rows:
         print(f"  - #{r['rank_list_id']} {r['platform']} / {r['rank_family']} / {r['rank_sub_cat']}")
+        print(f"    来源URL: {r['source_url'][:80]}...")
 
-    print("\n[db] 榜单快照 (rank_snapshots):")
+    print("\n榜单快照 (rank_snapshots):")
     cur.execute(
         """
         SELECT snapshot_id, rank_list_id, snapshot_date, item_count
@@ -107,10 +109,13 @@ def _peek_some_rows(db_path: str):
         LIMIT 5
         """
     )
-    for r in cur.fetchall():
-        print(f"  - snapshot#{r['snapshot_id']} list#{r['rank_list_id']} {r['snapshot_date']} items={r['item_count']}")
+    rows = cur.fetchall()
+    if not rows:
+        print("(暂无数据)")
+    for r in rows:
+        print(f"  - 快照#{r['snapshot_id']} 榜单#{r['rank_list_id']} {r['snapshot_date']} 书籍数={r['item_count']}")
 
-    print("\n[db] 榜单条目 (rank_entries - top 5):")
+    print("\n 榜单条目 (最新快照的前5名):")
     cur.execute(
         """
         SELECT re.rank, n.platform, n.platform_novel_id, nt.title, n.author, n.main_category, re.total_recommend
@@ -125,12 +130,13 @@ def _peek_some_rows(db_path: str):
     )
     rows = cur.fetchall()
     if not rows:
-        print("  (暂无数据)")
+        print("(暂无数据)")
     for r in rows:
         title = r["title"] or "(无主标题)"
-        print(f"  - 排名 {r['rank']}: 《{title}》 / {r['author']} / {r['main_category']} / 总推荐={r['total_recommend']}")
+        print(f"  - 第{r['rank']:2}名: 《{title[:20]}...》")
+        print(f"     作者: {r['author']} | 分类: {r['main_category']} | 总推荐: {r['total_recommend'] or 'N/A'}")
 
-    print("\n[db] 小说 (novels):")
+    print("\n小说基本信息 (最新5本):")
     cur.execute(
         """
         SELECT novel_uid, platform, platform_novel_id, author, main_category, status, total_words
@@ -139,11 +145,16 @@ def _peek_some_rows(db_path: str):
         LIMIT 5
         """
     )
-    for r in cur.fetchall():
-        print(
-            f"  - #{r['novel_uid']} {r['platform']}:{r['platform_novel_id']} / {r['author']} / {r['main_category']} / {r['status']} / {r['total_words']}字")
+    rows = cur.fetchall()
+    if not rows:
+        print("(暂无数据)")
+    for r in rows:
+        words = f"{r['total_words']:,}" if r['total_words'] else "未知"
+        print(f"  - #{r['novel_uid']} {r['platform']}:{r['platform_novel_id']}")
+        print(f"     作者: {r['author']} | 分类: {r['main_category']} | 状态: {r['status']}")
+        print(f"     字数: {words}")
 
-    print("\n[db] 标签 (tags):")
+    print("\n 标签信息 (最新10个):")
     cur.execute(
         """
         SELECT tag_id, tag_name
@@ -152,10 +163,13 @@ def _peek_some_rows(db_path: str):
         LIMIT 10
         """
     )
-    for r in cur.fetchall():
+    rows = cur.fetchall()
+    if not rows:
+        print("(暂无数据)")
+    for r in rows:
         print(f"  - #{r['tag_id']}: {r['tag_name']}")
 
-    print("\n[db] 章节 (first_n_chapters):")
+    print("\n章节内容 (最新5章):")
     cur.execute(
         """
         SELECT fc.novel_uid, fc.chapter_num, fc.chapter_title, fc.word_count, fc.publish_date
@@ -166,25 +180,49 @@ def _peek_some_rows(db_path: str):
         LIMIT 5
         """
     )
-    for r in cur.fetchall():
-        print(
-            f"  - novel#{r['novel_uid']} 第{r['chapter_num']}章: {r['chapter_title'][:30]}... / {r['word_count']}字 / {r['publish_date']}")
+    rows = cur.fetchall()
+    if not rows:
+        print("(暂无数据)")
+    for r in rows:
+        title = r["chapter_title"][:30] + "..." if len(r["chapter_title"]) > 30 else r["chapter_title"]
+        print(f"  - 小说#{r['novel_uid']} 第{r['chapter_num']}章: {title}")
+        print(f"     字数: {r['word_count']} | 发布时间: {r['publish_date']}")
 
     conn.close()
+    print("\n" + "-" * 80)
 
-
-def _test_fetch_rank_list(spider, db, rank_key="hotsales", snapshot_date=None):
-    """测试抓取榜单并保存到数据库"""
-    print(f"\n{'=' * 60}")
-    print(f"测试：抓取榜单数据并保存到数据库 (rank_type={rank_key})")
-    print(f"{'=' * 60}")
+"""测试抓取榜单并保存到数据库"""
+def _test_fetch_rank_list(spider, db, rank_key="hotsales", snapshot_date=None, pages=1, top_n=None):
+    print(f"\n{'=' * 80}")
+    print(f"测试: 抓取榜单数据")
+    print(f"{'=' * 80}")
+    print(f"测试配置:")
+    print(f"  - 榜单类型: {rank_key}")
+    print(f"  - 抓取页数: {pages}")
+    print(f"  - 快照日期: {snapshot_date or '今天'}")
+    print(f"  - 限制数量: {top_n or '无限制'}")
+    print(f"{'=' * 80}")
 
     try:
+        # 临时修改页数配置
+        original_pages = spider.site_config.get("pages_per_rank", 5)
+        spider.site_config["pages_per_rank"] = pages
+
+        print(f"开始抓取 {rank_key} 榜 (共{pages}页)...")
         books = spider.fetch_rank_list(rank_type=rank_key)
-        print(f"[成功] 抓取了 {len(books)} 本书籍")
+
+        # 恢复原始配置
+        spider.site_config["pages_per_rank"] = original_pages
+
+        print(f"成功抓取了 {len(books)} 本书籍")
+
+        # 限制数量
+        if top_n and top_n > 0:
+            books = books[:top_n]
+            print(f"限制为前 {top_n} 本书籍")
 
         if books:
-            print("\n前3本书籍信息:")
+            print(f"\n前3本书籍信息:")
             for i, book in enumerate(books[:3], 1):
                 print(f"\n{i}. 《{book.get('title', '无标题')}》")
                 print(f"   作者: {book.get('author', '未知')}")
@@ -210,6 +248,7 @@ def _test_fetch_rank_list(spider, db, rank_key="hotsales", snapshot_date=None):
                 rank_family = "未知榜单"
                 rank_sub_cat = ""
 
+            print(f"\n保存到数据库...")
             inserted = db.save_rank_snapshot(
                 platform="qidian",
                 rank_family=rank_family,
@@ -219,30 +258,34 @@ def _test_fetch_rank_list(spider, db, rank_key="hotsales", snapshot_date=None):
                 source_url=source_url,
                 make_title_primary=True,
             )
-            print(f"[数据库] 保存了 {inserted} 条榜单记录")
+            print(f"保存了 {inserted} 条榜单记录到数据库")
             _print_table_counts(db)
 
         return books
     except Exception as e:
-        print(f"[失败] 抓取榜单失败: {e}")
+        print(f"抓取榜单失败: {e}")
         import traceback
         traceback.print_exc()
         return []
 
-
+"""测试抓取小说详情并保存到数据库"""
 def _test_fetch_novel_detail(spider, db, novel_url=None, novel_id=None):
-    """测试抓取小说详情并保存到数据库"""
-    print(f"\n{'=' * 60}")
-    print("测试：抓取小说详情")
-    print(f"{'=' * 60}")
+    print(f"\n{'=' * 80}")
+    print("测试: 抓取小说详情")
+    print(f"{'=' * 80}")
+    print(f"测试配置:")
+    print(f"  - 小说URL: {novel_url or 'N/A'}")
+    print(f"  - 小说ID: {novel_id or 'N/A'}")
+    print(f"{'=' * 80}")
 
     if not novel_url and not novel_id:
-        print("[跳过] 没有提供小说URL或ID")
+        print("⚠没有提供小说URL或ID，跳过测试")
         return None
 
     try:
+        print(f"开始抓取小说详情...")
         detail = spider.fetch_novel_detail(novel_url or "", novel_id or "")
-        print("[成功] 抓取了小说详情")
+        print(f"成功抓取了小说详情")
 
         print(f"\n小说详情信息:")
         print(f"   标题: 《{detail.get('title', '无标题')}》")
@@ -257,6 +300,7 @@ def _test_fetch_novel_detail(spider, db, novel_url=None, novel_id=None):
 
         # 保存到数据库（通过创建一个虚拟榜单的方式）
         if db and detail.get('platform_novel_id'):
+            print(f"\n通过测试榜单保存小说详情到数据库...")
             # 创建一个单本书籍的榜单快照来保存小说信息
             book_item = {
                 "novel_id": detail.get('platform_novel_id'),
@@ -287,37 +331,44 @@ def _test_fetch_novel_detail(spider, db, novel_url=None, novel_id=None):
                 source_url=detail.get('url', ''),
                 make_title_primary=True,
             )
-            print(f"[数据库] 通过测试榜单保存了小说详情")
+            print(f"通过测试榜单保存了小说详情")
 
         return detail
     except Exception as e:
-        print(f"[失败] 抓取详情失败: {e}")
+        print(f"抓取详情失败: {e}")
         import traceback
         traceback.print_exc()
         return None
 
-
+"""测试抓取前N章内容并保存到数据库"""
 def _test_fetch_first_n_chapters(spider, db, novel_url=None, novel_id=None, chapter_n=3):
-    """测试抓取前N章内容并保存到数据库"""
-    print(f"\n{'=' * 60}")
-    print(f"测试：抓取前{chapter_n}章内容并保存到数据库")
-    print(f"{'=' * 60}")
+    print(f"\n{'=' * 80}")
+    print(f"测试: 抓取前{chapter_n}章内容")
+    print(f"{'=' * 80}")
+    print(f"测试配置:")
+    print(f"  - 小说URL: {novel_url or 'N/A'}")
+    print(f"  - 小说ID: {novel_id or 'N/A'}")
+    print(f"  - 章节数: {chapter_n}")
+    print(f"{'=' * 80}")
 
     if not novel_url:
-        print("[跳过] 没有提供小说URL")
+        print("没有提供小说URL，跳过测试")
         return []
 
     try:
+        print(f"开始抓取前{chapter_n}章内容...")
         chapters = spider.fetch_first_n_chapters(novel_url, n=chapter_n)
-        print(f"[成功] 抓取了 {len(chapters)} 章内容")
+        print(f"成功抓取了 {len(chapters)} 章内容")
 
         if chapters:
-            print(f"\n前{min(3, len(chapters))}章信息:")
+            print(f"\n📖 前{min(3, len(chapters))}章信息:")
             for i, chapter in enumerate(chapters[:3], 1):
                 print(f"\n{i}. {chapter.get('chapter_title', '无标题')}")
                 print(f"   字数: {chapter.get('word_count', 0)}")
                 print(f"   发布日期: {chapter.get('publish_date', '未知')}")
-                print(f"   内容预览: {chapter.get('chapter_content', '')[:100]}...")
+                content_preview = chapter.get('chapter_content', '')
+                if content_preview:
+                    print(f"   内容预览: {content_preview[:100]}...")
 
         # 保存章节到数据库
         if db and chapters:
@@ -331,6 +382,7 @@ def _test_fetch_first_n_chapters(spider, db, novel_url=None, novel_id=None, chap
 
             if novel_id:
                 # 获取小说基本信息
+                print(f"\n获取小说基本信息并保存章节...")
                 detail = spider.fetch_novel_detail(novel_url, novel_id)
 
                 inserted = db.upsert_first_n_chapters(
@@ -349,88 +401,110 @@ def _test_fetch_first_n_chapters(spider, db, novel_url=None, novel_id=None, chap
                         "tags": detail.get('tags', []),
                     },
                 )
-                print(f"[数据库] 保存了 {inserted} 章内容")
+                print(f"保存了 {inserted} 章内容到数据库")
 
         return chapters
     except Exception as e:
-        print(f"[失败] 抓取章节失败: {e}")
+        print(f"抓取章节失败: {e}")
         import traceback
         traceback.print_exc()
         return []
 
-
-def _test_enrich_rank_items(spider, db, books, max_books=3, snapshot_date=None):
-    """测试丰富榜单数据并保存到数据库"""
-    print(f"\n{'=' * 60}")
-    print(f"测试：丰富榜单数据并保存到数据库 (最多{max_books}本)")
-    print(f"{'=' * 60}")
+"""测试补全榜单数据并保存到数据库"""
+def _test_enrich_rank_items(spider, db, books, max_books=3, snapshot_date=None,
+                            fetch_detail=True, fetch_chapters=False, chapter_n=3):
+    print(f"\n{'=' * 80}")
+    print(f"测试: 补全榜单数据")
+    print(f"{'=' * 80}")
+    print(f"测试配置:")
+    print(f"  - 书籍数量: {len(books)} 本")
+    print(f"  - 最大处理: {max_books} 本")
+    print(f"  - 获取详情: {'是' if fetch_detail else '否'}")
+    print(f"  - 获取章节: {'是' if fetch_chapters else '否'} (章节数: {chapter_n})")
+    print(f"  - 章节智能补全: {'是' if fetch_chapters else '不适用'}")
+    print(f"{'=' * 80}")
 
     if not books:
-        print("[跳过] 没有书籍数据")
+        print("没有书籍数据，跳过测试")
         return []
 
     try:
+        print(f"开始补全 {min(max_books, len(books))} 本书籍的数据...")
         enriched_books = spider.enrich_rank_items(
             books,
             max_books=max_books,
-            fetch_detail=True,
-            fetch_chapters=False,
+            fetch_detail=fetch_detail,
+            fetch_chapters=fetch_chapters,
+            chapter_count=chapter_n,
         )
-        print(f"[成功] 丰富了 {len(enriched_books)} 本书籍的数据")
+        print(f"成功补全了 {len(enriched_books)} 本书籍的数据")
 
         if enriched_books:
-            print(f"\n丰富后的数据:")
+            print(f"\n补全后的数据对比:")
             for i, book in enumerate(enriched_books[:2], 1):
+                original = books[i - 1] if i - 1 < len(books) else {}
                 print(f"\n{i}. 《{book.get('title', '无标题')}》")
-                print(
-                    f"   分类变化: {books[i - 1].get('main_category', '未知')} -> {book.get('main_category', '未知')}")
+                print(f"   分类变化: {original.get('main_category', '未知')} -> {book.get('main_category', '未知')}")
                 print(f"   状态: {book.get('status', '未知')}")
                 print(f"   字数: {book.get('total_words', 0)}")
                 print(f"   总推荐: {book.get('total_recommend', 'N/A')}")
                 print(f"   上架时间: {book.get('first_upload_date', '未知')}")
+                if fetch_chapters:
+                    chapters = book.get('first_n_chapters', [])
+                    print(f"   章节数: {len(chapters)}")
 
-        # 保存丰富后的数据到数据库
+        # 保存补全后的数据到数据库
         if db and enriched_books:
             snapshot_date = snapshot_date or datetime.now().strftime("%Y-%m-%d")
             source_url = spider.site_config.get("rank_urls", {}).get("hotsales", "")
 
+            print(f"\n保存补全后的数据到数据库...")
             inserted = db.save_rank_snapshot(
                 platform="qidian",
-                rank_family="丰富测试榜",
+                rank_family="补全测试榜",
                 rank_sub_cat="",
                 snapshot_date=snapshot_date,
                 items=enriched_books,
                 source_url=source_url,
                 make_title_primary=True,
             )
-            print(f"[数据库] 保存了 {inserted} 条丰富后的榜单记录")
+            print(f"保存了 {inserted} 条补全后的榜单记录到数据库")
 
         return enriched_books
     except Exception as e:
-        print(f"[失败] 丰富数据失败: {e}")
+        print(f"补全数据失败: {e}")
         import traceback
         traceback.print_exc()
         return books[:max_books]
 
-
-def _test_fetch_and_save_rank(spider, db, rank_key="hotsales", pages=1, top_n=3, fetch_chapters=False, chapter_n=3):
-    """测试完整流程：抓取榜单 -> 丰富数据 -> 保存到数据库"""
-    print(f"\n{'=' * 60}")
-    print(f"测试：完整流程 (抓取榜单 -> 丰富数据 -> 保存到数据库)")
-    print(f"{'=' * 60}")
+"""测试完整流程：抓取榜单 -> 补全数据 -> 保存到数据库"""
+def _test_fetch_and_save_rank(spider, db, rank_key="hotsales", pages=1, top_n=3,
+                              fetch_detail=True, fetch_chapters=False, chapter_n=3):
+    print(f"\n{'=' * 80}")
+    print(f"测试: 完整流程")
+    print(f"{'=' * 80}")
+    print(f"测试配置:")
+    print(f"  - 榜单类型: {rank_key}")
+    print(f"  - 抓取页数: {pages}")
+    print(f"  - 处理数量: {top_n}")
+    print(f"  - 获取详情: {'是' if fetch_detail else '否'}")
+    print(f"  - 获取章节: {'是' if fetch_chapters else '否'} (章节数: {chapter_n})")
+    print(f"  - 章节智能补全: {'是' if fetch_chapters else '不适用'}")
+    print(f"{'=' * 80}")
 
     try:
+        print(f"开始完整流程测试...")
         result = spider.fetch_and_save_rank(
             rank_type=rank_key,
             pages=pages,
-            enrich_detail=True,
+            enrich_detail=fetch_detail,
             enrich_chapters=fetch_chapters,
             chapter_count=chapter_n,
             snapshot_date=datetime.now().strftime("%Y-%m-%d"),
             max_books=top_n,
         )
 
-        print(f"[成功] 完成完整流程")
+        print(f"\n完整流程完成")
         print(f"   榜单类型: {result.get('rank_type')}")
         print(f"   榜单大类: {result.get('rank_family')}")
         print(f"   子分类: {result.get('rank_sub_cat')}")
@@ -448,24 +522,34 @@ def _test_fetch_and_save_rank(spider, db, rank_key="hotsales", pages=1, top_n=3,
                 if fetch_chapters:
                     chapters = book.get('first_n_chapters', [])
                     print(f"   章节数: {len(chapters)}")
+                    if chapters:
+                        existing_count = spider._get_existing_chapter_count(book.get('platform_novel_id', ''))
+                        new_count = len(chapters) - existing_count
+                        if new_count > 0:
+                            print(f"   新抓取章节: {new_count}")
 
         return result
     except Exception as e:
-        print(f"[失败] 完整流程失败: {e}")
+        print(f"完整流程失败: {e}")
         import traceback
         traceback.print_exc()
         return {}
 
-
-def _test_all_ranks(spider, db):
-    """测试抓取所有配置的榜单并保存到数据库"""
-    print(f"\n{'=' * 60}")
-    print("测试：抓取所有配置的榜单并保存到数据库")
-    print(f"{'=' * 60}")
+"""测试抓取所有config中的目标榜单并保存到数据库"""
+def _test_all_ranks(spider, db, pages=1, max_books_per_rank=20):
+    print(f"\n{'=' * 80}")
+    print("测试: 抓取所有目标榜单")
+    print(f"{'=' * 80}")
+    print(f"测试配置:")
+    print(f"  - 抓取页数: {pages}")
+    print(f"  - 每榜数量: {max_books_per_rank}")
+    print(f"  - 榜单列表: {list(spider.site_config.get('rank_urls', {}).keys())}")
+    print(f"{'=' * 80}")
 
     try:
+        print(f"开始抓取所有榜单...")
         all_books = spider.fetch_whole_rank()
-        print(f"[成功] 抓取了所有榜单，共 {len(all_books)} 本书籍")
+        print(f"抓取了所有榜单，共 {len(all_books)} 本书籍")
 
         # 统计分类信息
         categories = {}
@@ -475,39 +559,173 @@ def _test_all_ranks(spider, db):
 
         print(f"\n分类统计:")
         for cat, count in sorted(categories.items(), key=lambda x: x[1], reverse=True):
-            print(f"   {cat}: {count}本")
+            percentage = (count / len(all_books)) * 100 if all_books else 0
+            print(f"   {cat:<8}: {count:>3}本 ({percentage:.1f}%)")
 
         # 保存所有数据到数据库
         if db and all_books:
             snapshot_date = datetime.now().strftime("%Y-%m-%d")
+
+            # 限制数量避免数据太多
+            books_to_save = all_books[:max_books_per_rank * 3]
+            print(f"\n保存 {len(books_to_save)} 本书籍到数据库 (限制: {max_books_per_rank * 3}本)...")
 
             inserted = db.save_rank_snapshot(
                 platform="qidian",
                 rank_family="综合榜单",
                 rank_sub_cat="所有榜单合并",
                 snapshot_date=snapshot_date,
-                items=all_books[:50],  # 最多保存50本，避免数据太多
+                items=books_to_save,
                 source_url="https://www.qidian.com",
                 make_title_primary=True,
             )
-            print(f"[数据库] 保存了 {inserted} 条综合榜单记录")
+            print(f"保存了 {inserted} 条综合榜单记录到数据库")
 
         return all_books
     except Exception as e:
-        print(f"[失败] 抓取所有榜单失败: {e}")
+        print(f"抓取所有榜单失败: {e}")
         import traceback
         traceback.print_exc()
         return []
 
+"""验证章节是否被正确存储到数据库"""
+def _verify_chapter_storage(db_path: str) -> Dict[str, Any]:
+    conn = _open_sqlite(db_path)
+    cur = conn.cursor()
 
+    results = {
+        "total_chapters": 0,
+        "novels_with_chapters": 0,
+        "novels_details": [],
+        "errors": []
+    }
+
+    try:
+        # 1. 直接查询所有章节
+        cur.execute("SELECT COUNT(*) as count FROM first_n_chapters")
+        total = cur.fetchone()['count']
+        print(f"first_n_chapters表总记录数: {total}")
+        results["total_chapters"] = total
+
+        # 2. 查询每个小说的章节数
+        cur.execute("""
+                SELECT 
+                    n.novel_uid,
+                    n.platform_novel_id,
+                    n.author,
+                    COUNT(fc.chapter_id) as chapter_count
+                FROM novels n
+                LEFT JOIN first_n_chapters fc ON fc.novel_uid = n.novel_uid
+                WHERE n.platform = 'qidian'
+                GROUP BY n.novel_uid, n.platform_novel_id
+                ORDER BY n.novel_uid DESC
+            """)
+
+        novels = cur.fetchall()
+
+        if not novels:
+            print("数据库中没有小说记录")
+        else:
+            print(f"找到 {len(novels)} 本小说")
+
+            for novel in novels:
+                novel_id = novel['platform_novel_id']
+                novel_uid = novel['novel_uid']
+                author = novel['author']
+                count = novel['chapter_count']
+
+                if count > 0:
+                    results["novels_with_chapters"] += 1
+
+                # 获取小说标题
+                cur.execute("""
+                        SELECT title FROM novel_titles 
+                        WHERE novel_uid = ? AND is_primary = 1
+                        LIMIT 1
+                    """, (novel_uid,))
+                title_row = cur.fetchone()
+                title = title_row['title'] if title_row else "未知"
+
+                novel_details = {
+                    "novel_id": novel_id,
+                    "title": title,
+                    "author": author,
+                    "chapter_count": count,
+                }
+
+                # 获取章节详情
+                if count > 0:
+                    cur.execute("""
+                            SELECT chapter_num, chapter_title, word_count, publish_date
+                            FROM first_n_chapters
+                            WHERE novel_uid = ?
+                            ORDER BY chapter_num ASC
+                        """, (novel_uid,))
+                    chapters = cur.fetchall()
+                    novel_details["chapters"] = [dict(ch) for ch in chapters[:5]]
+
+                results["novels_details"].append(novel_details)
+
+                status = "✅" if count > 0 else "❌"
+                print(f"  {status} 小说ID: {novel_id}")
+                print(f"      标题: {title}")
+                print(f"      作者: {author}")
+                print(f"      章节数: {count}")
+
+        # 3. 显示最近的章节
+        if total > 0:
+            print(f"\n最近5章记录:")
+            cur.execute("""
+                    SELECT 
+                        fc.novel_uid,
+                        n.platform_novel_id,
+                        fc.chapter_num,
+                        fc.chapter_title,
+                        fc.word_count,
+                        fc.publish_date
+                    FROM first_n_chapters fc
+                    JOIN novels n ON n.novel_uid = fc.novel_uid
+                    ORDER BY fc.chapter_id DESC
+                    LIMIT 5
+                """)
+            recent_chapters = cur.fetchall()
+
+            for ch in recent_chapters:
+                ch_title = ch['chapter_title']
+                if len(ch_title) > 30:
+                    ch_title = ch_title[:27] + "..."
+                print(f"    - 小说ID:{ch['platform_novel_id']} 第{ch['chapter_num']}章: {ch_title}")
+                print(f"        字数: {ch['word_count']}, 发布时间: {ch['publish_date']}")
+
+        # 4. 统计信息
+        print(f"\n统计摘要:")
+        print(f"  总章节数: {results['total_chapters']}")
+        print(f"  有章节的小说数: {results['novels_with_chapters']}")
+        print(f"  总小说数: {len(novels) if novels else 0}")
+
+    except Exception as e:
+        print(f"验证过程中出错: {e}")
+        import traceback
+        print(f"详细错误: {traceback.format_exc()}")
+        results["errors"].append(f"验证错误: {e}")
+
+    finally:
+        conn.close()
+
+    return results
+
+"""全面的起点爬虫测试，所有数据保存到数据库"""
 def run_comprehensive_qidian_test(
         *,
         test_cases: list = None,
         pages: int = 1,
         top_n: int = 3,
+        fetch_detail: bool = True,
         fetch_chapters: bool = False,
         chapter_n: int = 3,
         rank_key: str = "hotsales",
+        max_books_per_test: int = None,
+        verbose: bool = True,
 ):
     """
     全面的起点爬虫测试，所有数据保存到数据库。
@@ -518,13 +736,28 @@ def run_comprehensive_qidian_test(
                     'enrich', 'full_pipeline', 'all_ranks', 'all']
         pages: 抓取榜单页数
         top_n: 测试书籍数量
-        fetch_chapters: 是否抓取章节
+        fetch_detail: 是否获取详情
+        fetch_chapters: 是否获取章节
         chapter_n: 抓取章节数
         rank_key: 榜单类型
+        max_books_per_test: 每个测试最大处理书籍数
+        verbose: 是否显示详细日志
     """
-    print("=" * 80)
+    print("\n" + "=" * 100)
     print("起点中文网爬虫 - 全面功能测试 (数据保存到数据库)")
-    print("=" * 80)
+    print("=" * 100)
+
+    # 显示测试配置
+    print(f"\n测试配置:")
+    print(f"  - 测试用例: {test_cases or ['all']}")
+    print(f"  - 榜单类型: {rank_key}")
+    print(f"  - 抓取页数: {pages}")
+    print(f"  - 处理数量: {top_n}")
+    print(f"  - 获取详情: {'是' if fetch_detail else '否'}")
+    print(f"  - 获取章节: {'是' if fetch_chapters else '否'}")
+    print(f"  - 章节数量: {chapter_n}")
+    print(f"  - 详细日志: {'是' if verbose else '否'}")
+    print(f"{'=' * 100}")
 
     # 默认测试所有用例
     if test_cases is None or 'all' in test_cases:
@@ -538,15 +771,16 @@ def run_comprehensive_qidian_test(
     _ensure_clean_dirs()
 
     # 初始化数据库
-    print("\n[1] 初始化测试数据库 ...")
+    print(f"\n[1/4] 初始化测试数据库...")
     from database.db_handler import DatabaseHandler
 
     db_path = os.path.join(project_root, "test_output", "qidian_test.db")
     db = DatabaseHandler(db_path, is_test=True)
-    print(f"[db] 数据库路径: {db_path}")
+    print(f"  数据库路径: {db_path}")
+    print(f"  测试模式: 是")
 
     # 初始化爬虫
-    print("\n[2] 初始化起点爬虫 ...")
+    print(f"\n[2/4] 初始化起点爬虫...")
     from spiders.qidian_spider import QidianSpider
 
     qidian_config = {
@@ -568,101 +802,193 @@ def run_comprehensive_qidian_test(
     }
 
     spider = QidianSpider(qidian_config, db)
-    print(f"[spider] 爬虫初始化完成")
+    print(f"  爬虫初始化完成")
+    print(f"  默认章节数: {spider.default_chapter_count}")
+    print(f"  榜单类型映射: {list(spider.rank_type_map.keys())}")
 
     # 显示初始数据库状态
+    print(f"\n[3/4] 初始数据库状态:")
     _print_table_counts(db)
 
     # 存储测试数据
     test_data = {}
+    test_results = {}
 
     # 运行测试用例
-    for test_case in test_cases:
+    print(f"\n[4/4] 运行测试用例 ({len(test_cases)}个):")
+    for i, test_case in enumerate(test_cases, 1):
+        print(f"\n{i}/{len(test_cases)}. 测试用例: {test_case}")
+
+        start_time = time.time()
+
         if test_case == 'rank_list':
             # 测试抓取榜单
-            books = _test_fetch_rank_list(spider, db, rank_key)
+            books = _test_fetch_rank_list(spider, db, rank_key, pages=pages, top_n=top_n)
             test_data['rank_list_books'] = books
+            test_results['rank_list'] = {
+                'success': len(books) > 0,
+                'count': len(books),
+                'time': time.time() - start_time
+            }
 
             if books:
                 # 保存第一本书的信息用于后续测试
                 test_data['sample_book'] = books[0]
                 test_data['sample_url'] = books[0].get('url', '')
                 test_data['sample_id'] = books[0].get('platform_novel_id', '')
+                print(f"  样本书籍: 《{books[0].get('title', '')}》 (ID: {test_data['sample_id']})")
 
-        elif test_case == 'novel_detail' and 'sample_url' in test_data:
+        elif test_case == 'novel_detail':
+            # 检查是否有样本数据，如果没有则先抓取榜单
+            if 'sample_url' not in test_data:
+                print("  先获取榜单数据以获取样本小说...")
+                books = _test_fetch_rank_list(spider, db, rank_key, pages=pages, top_n=1)
+                if books:
+                    test_data['sample_url'] = books[0].get('url', '')
+                    test_data['sample_id'] = books[0].get('platform_novel_id', '')
+
             # 测试抓取小说详情
-            detail = _test_fetch_novel_detail(
-                spider, db,
-                novel_url=test_data.get('sample_url'),
-                novel_id=test_data.get('sample_id')
-            )
-            test_data['novel_detail'] = detail
+            if 'sample_url' in test_data:
+                detail = _test_fetch_novel_detail(
+                    spider, db,
+                    novel_url=test_data.get('sample_url'),
+                    novel_id=test_data.get('sample_id')
+                )
+                test_data['novel_detail'] = detail
+                test_results['novel_detail'] = {
+                    'success': detail is not None,
+                    'time': time.time() - start_time
+                }
+            else:
+                print("  跳过 - 没有可用的样本小说URL")
 
-        elif test_case == 'chapters' and 'sample_url' in test_data:
+        elif test_case == 'chapters':
+            # 检查是否有样本数据，如果没有则先抓取榜单
+            if 'sample_url' not in test_data:
+                print("  先获取榜单数据以获取样本小说...")
+                books = _test_fetch_rank_list(spider, db, rank_key, pages=pages, top_n=1)
+                if books:
+                    test_data['sample_url'] = books[0].get('url', '')
+                    test_data['sample_id'] = books[0].get('platform_novel_id', '')
+
             # 测试抓取章节
-            chapters = _test_fetch_first_n_chapters(
-                spider, db,
-                novel_url=test_data.get('sample_url'),
-                novel_id=test_data.get('sample_id'),
-                chapter_n=chapter_n
-            )
-            test_data['chapters'] = chapters
+            if 'sample_url' in test_data:
+                chapters = _test_fetch_first_n_chapters(
+                    spider, db,
+                    novel_url=test_data.get('sample_url'),
+                    novel_id=test_data.get('sample_id'),
+                    chapter_n=chapter_n
+                )
+                test_data['chapters'] = chapters
+                test_results['chapters'] = {
+                    'success': len(chapters) > 0,
+                    'count': len(chapters),
+                    'time': time.time() - start_time
+                }
+            else:
+                print("  跳过 - 没有可用的样本小说URL")
 
-        elif test_case == 'enrich' and 'rank_list_books' in test_data:
-            # 测试丰富数据
-            enriched = _test_enrich_rank_items(
-                spider, db,
-                test_data['rank_list_books'],
-                max_books=min(top_n, len(test_data['rank_list_books']))
-            )
-            test_data['enriched_books'] = enriched
+        elif test_case == 'enrich':
+            # 检查是否有榜单数据，如果没有则先抓取
+            if 'rank_list_books' not in test_data:
+                print("  先获取榜单数据...")
+                books = _test_fetch_rank_list(spider, db, rank_key, pages=pages, top_n=top_n)
+                if books:
+                    test_data['rank_list_books'] = books
+
+            # 测试补全数据
+            if 'rank_list_books' in test_data and test_data['rank_list_books']:
+                max_books = max_books_per_test or top_n
+                enriched = _test_enrich_rank_items(
+                    spider, db,
+                    test_data['rank_list_books'],
+                    max_books=min(max_books, len(test_data['rank_list_books'])),
+                    fetch_detail=fetch_detail,
+                    fetch_chapters=fetch_chapters,
+                    chapter_n=chapter_n
+                )
+                test_data['enriched_books'] = enriched
+                test_results['enrich'] = {
+                    'success': len(enriched) > 0,
+                    'count': len(enriched),
+                    'time': time.time() - start_time
+                }
+            else:
+                print("  跳过 - 没有可用的榜单数据")
 
         elif test_case == 'full_pipeline':
             # 测试完整流程
             result = _test_fetch_and_save_rank(
-                spider, db, rank_key, pages, top_n, fetch_chapters, chapter_n
+                spider, db, rank_key, pages, top_n, fetch_detail, fetch_chapters, chapter_n
             )
             test_data['full_pipeline_result'] = result
+            test_results['full_pipeline'] = {
+                'success': result.get('snapshot_id') is not None,
+                'snapshot_id': result.get('snapshot_id'),
+                'count': len(result.get('items', [])),
+                'time': time.time() - start_time
+            }
 
         elif test_case == 'all_ranks':
             # 测试抓取所有榜单
-            all_books = _test_all_ranks(spider, db)
+            all_books = _test_all_ranks(spider, db, pages=pages, max_books_per_rank=top_n)
             test_data['all_ranks_books'] = all_books
+            test_results['all_ranks'] = {
+                'success': len(all_books) > 0,
+                'count': len(all_books),
+                'time': time.time() - start_time
+            }
 
-        # 测试间隔
+        else:
+            print(f"  跳过测试用例 {test_case} (未知的测试类型)")
+
+        # 测试间隔（不是最后一个测试）
         if test_case != test_cases[-1]:
-            print("\n" + "=" * 60)
-            print("等待3秒后继续下一个测试...")
-            print("=" * 60 + "\n")
-            time.sleep(3)
+            delay = 3
+            print(f"  等待{delay}秒后继续下一个测试...")
+            time.sleep(delay)
 
     # 最终数据库状态
-    print("\n" + "=" * 80)
+    print(f"\n{'=' * 100}")
     print("最终数据库状态:")
-    print("=" * 80)
+    print(f"{'=' * 100}")
     _print_table_counts(db)
-    _peek_some_rows(db_path)
+
+    if verbose:
+        _peek_some_rows(db_path)
 
     # 生成测试报告
-    print("\n" + "=" * 80)
+    print(f"\n{'=' * 100}")
     print("测试报告:")
-    print("=" * 80)
+    print(f"{'=' * 100}")
 
     # 统计测试结果
-    total_tests = len(test_cases)
-    passed_tests = 0
+    total_tests = len(test_results)
+    passed_tests = sum(1 for result in test_results.values() if result.get('success', False))
 
-    test_results = []
-    for test_case in test_cases:
-        if test_case in test_data and test_data.get(test_case + '_books') or test_data.get(test_case + '_result'):
-            passed_tests += 1
-            test_results.append(f"✓ {test_case}: 成功")
-        else:
-            test_results.append(f"✗ {test_case}: 失败或未执行")
+    print(f"\n测试用例执行情况 ({passed_tests}/{total_tests} 通过):")
+    for test_name, result in test_results.items():
+        status = "通过" if result.get('success', False) else "失败"
+        time_taken = f"{result.get('time', 0):.1f}s"
 
-    print(f"\n测试用例 ({passed_tests}/{total_tests} 通过):")
-    for result in test_results:
-        print(f"  {result}")
+        if test_name == 'rank_list':
+            count = result.get('count', 0)
+            print(f"  {status} {test_name:<15}: 抓取{count}本书籍, 耗时{time_taken}")
+        elif test_name == 'novel_detail':
+            print(f"  {status} {test_name:<15}: 详情页抓取, 耗时{time_taken}")
+        elif test_name == 'chapters':
+            count = result.get('count', 0)
+            print(f"  {status} {test_name:<15}: 抓取{count}个章节, 耗时{time_taken}")
+        elif test_name == 'enrich':
+            count = result.get('count', 0)
+            print(f"  {status} {test_name:<15}: 补全{count}本书籍, 耗时{time_taken}")
+        elif test_name == 'full_pipeline':
+            snapshot_id = result.get('snapshot_id', 'N/A')
+            count = result.get('count', 0)
+            print(f"  {status} {test_name:<15}: 快照ID={snapshot_id}, {count}本书籍, 耗时{time_taken}")
+        elif test_name == 'all_ranks':
+            count = result.get('count', 0)
+            print(f"  {status} {test_name:<15}: 抓取{count}本书籍, 耗时{time_taken}")
 
     # 数据库统计详情
     print(f"\n数据库统计详情:")
@@ -670,45 +996,129 @@ def run_comprehensive_qidian_test(
     cur = conn.cursor()
 
     # 统计各表记录数
-    tables = ['novels', 'novel_titles', 'tags', 'novel_tag_map',
-              'rank_lists', 'rank_snapshots', 'rank_entries', 'first_n_chapters']
+    tables = [
+        ('novels', '小说基本信息'),
+        ('novel_titles', '小说标题记录'),
+        ('tags', '标签信息'),
+        ('novel_tag_map', '小说标签映射'),
+        ('rank_lists', '榜单列表'),
+        ('rank_snapshots', '榜单快照'),
+        ('rank_entries', '榜单条目'),
+        ('first_n_chapters', '前N章内容'),
+    ]
 
-    for table in tables:
+    total_records = 0
+    for table, description in tables:
         cur.execute(f"SELECT COUNT(*) as count FROM {table}")
         count = cur.fetchone()['count']
-        print(f"  {table}: {count} 条记录")
+        total_records += count
+        status = "有数据" if count > 0 else "无数据"
+        print(f"  {status} {description:<15}: {count:>5} 条记录")
+
+    print(f"\n  总计: {total_records} 条记录")
 
     conn.close()
 
+    # 验证章节存储
+    print(f"\n{'=' * 100}")
+    print("章节存储验证")
+    print(f"{'=' * 100}")
+    print(_verify_chapter_storage(db_path))
+
+    # 智能抓取统计
+    if 'enrich' in test_results and fetch_chapters:
+        print(f"\n智能章节抓取统计:")
+        print(f"  启用了智能抓取逻辑")
+        print(f"  目标章节数: {chapter_n}")
+        print(f"  数据库检查: 已实现")
+
     # 关闭爬虫
-    print("\n[完成] 所有测试完成，所有数据已保存到数据库")
+    print(f"\n{'=' * 100}")
+    print("测试完成")
+    print(f"{'=' * 100}")
+
     try:
         spider.close()
-        print("[spider] 爬虫已关闭")
+        print(f"爬虫已关闭")
     except Exception as e:
-        print(f"[spider] 关闭爬虫时出错: {e}")
+        print(f"关闭爬虫时出错: {e}")
 
-    print(f"\n数据库文件位置: {db_path}")
-    print("可以使用SQLite工具查看详细数据")
+    print(f"\n输出文件:")
+    print(f"  数据库文件: {db_path}")
+    print(f"  调试目录: test_output/debug/")
+
 
 
 def run_quick_test():
     """快速测试：只测试基本功能"""
-    print("=" * 80)
-    print("快速测试模式")
-    print("=" * 80)
+    print("\n" + "=" * 100)
+    print("⚡ 快速测试模式")
+    print("=" * 100)
+
+    print(f"\n测试配置:")
+    print(f"  - 测试用例: rank_list, novel_detail")
+    print(f"  - 抓取页数: 1")
+    print(f"  - 处理数量: 2")
+    print(f"  - 获取详情: 是")
+    print(f"  - 获取章节: 否")
+    print(f"{'=' * 100}")
 
     run_comprehensive_qidian_test(
         test_cases=['rank_list', 'novel_detail'],
         pages=1,
         top_n=2,
+        fetch_detail=True,
         fetch_chapters=False,
         rank_key="hotsales",
+        verbose=False,
     )
 
 
+def run_custom_test(args):
+    """自定义测试"""
+    test_cases = [args.test] if args.test != 'all' else None
+
+    if args.test == 'quick':
+        run_quick_test()
+    else:
+        run_comprehensive_qidian_test(
+            test_cases=test_cases,
+            pages=args.pages,
+            top_n=args.top_n,
+            fetch_detail=args.fetch_detail,
+            fetch_chapters=args.fetch_chapters,
+            chapter_n=args.chapter_n,
+            rank_key=args.rank_key,
+            max_books_per_test=args.max_books,
+            verbose=args.verbose,
+        )
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="起点中文网爬虫全面功能测试 - 数据保存到数据库")
+    parser = argparse.ArgumentParser(
+        description="起点中文网爬虫全面功能测试 - 数据保存到数据库",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+            使用示例:
+              # 快速测试
+              python tests/qidian_test.py --test quick
+            
+              # 完整测试
+              python tests/qidian_test.py --test all --pages 2 --top_n 5
+            
+              # 只测试榜单抓取
+              python tests/qidian_test.py --test rank_list --pages 1 --top_n 3
+            
+              # 测试完整流程（含章节）
+              python tests/qidian_test.py --test full_pipeline --pages 1 --top_n 2 --fetch_chapters --chapter_n 2
+            
+              # 测试所有榜单
+              python tests/qidian_test.py --test all_ranks --pages 1 --top_n 10
+            
+              # 详细模式
+              python tests/qidian_test.py --test all --verbose
+        """
+    )
 
     # 测试用例选择
     parser.add_argument("--test", type=str, default="all",
@@ -717,27 +1127,27 @@ if __name__ == "__main__":
                         help="要运行的测试用例")
 
     # 测试参数
-    parser.add_argument("--pages", type=int, default=1, help="抓取榜单页数")
-    parser.add_argument("--top_n", type=int, default=3, help="测试书籍数量")
-    parser.add_argument("--fetch_chapters", action="store_true", help="是否抓取章节")
-    parser.add_argument("--chapter_n", type=int, default=3, help="抓取章节数")
+    parser.add_argument("--pages", type=int, default=1,
+                        help="抓取榜单页数 (默认: 1)")
+    parser.add_argument("--top_n", type=int, default=3,
+                        help="测试书籍数量 (默认: 3)")
+    parser.add_argument("--fetch_detail", action="store_true", default=True,
+                        help="是否获取详情 (默认: 是)")
+    parser.add_argument("--no_fetch_detail", action="store_false", dest="fetch_detail",
+                        help="不获取详情")
+    parser.add_argument("--fetch_chapters", action="store_true",
+                        help="是否抓取章节 (默认: 否)")
+    parser.add_argument("--chapter_n", type=int, default=3,
+                        help="抓取章节数 (默认: 3)")
     parser.add_argument("--rank_key", type=str, default="hotsales",
                         choices=['hotsales', 'yuepiao', 'recommend', 'collect', 'newbook'],
-                        help="榜单类型")
+                        help="榜单类型 (默认: hotsales)")
+    parser.add_argument("--max_books", type=int, default=None,
+                        help="每个测试最大处理书籍数 (默认: 使用top_n)")
+    parser.add_argument("--verbose", action="store_true",
+                        help="显示详细日志和数据库内容")
 
     args = parser.parse_args()
 
-    # 根据参数决定测试内容
-    if args.test == 'quick':
-        run_quick_test()
-    else:
-        test_cases = [args.test] if args.test != 'all' else None
-
-        run_comprehensive_qidian_test(
-            test_cases=test_cases,
-            pages=args.pages,
-            top_n=args.top_n,
-            fetch_chapters=args.fetch_chapters,
-            chapter_n=args.chapter_n,
-            rank_key=args.rank_key,
-        )
+    # 运行测试
+    run_custom_test(args)

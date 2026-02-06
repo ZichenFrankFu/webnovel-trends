@@ -836,3 +836,38 @@ class DatabaseHandler:
                     conn.close()
 
         return self._run_with_retry(_do)
+
+    """获取小说的归一化标题"""
+    def get_novel_title_norm(self, platform: str, platform_novel_id: str) -> Optional[str]:
+        try:
+            # 使用_tx上下文管理器来执行查询
+            def query_func():
+                with self._tx(immediate=False) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT nt.title_norm
+                        FROM novels n
+                        JOIN novel_titles nt ON n.novel_uid = nt.novel_uid
+                        WHERE n.platform = ? 
+                          AND n.platform_novel_id = ?
+                          AND nt.is_primary = 1
+                        LIMIT 1
+                    """, (platform, platform_novel_id))
+                    result = cursor.fetchone()
+                    return result['title_norm'] if result else None
+
+            # 使用重试机制执行查询
+            title_norm = self._run_with_retry(query_func)
+
+            if title_norm:
+                self.logger.debug(f"获取归一化标题成功: {title_norm} (平台: {platform}, ID: {platform_novel_id})")
+            else:
+                self.logger.debug(f"未找到归一化标题 (平台: {platform}, ID: {platform_novel_id})")
+
+            return title_norm
+
+        except Exception as e:
+            self.logger.error(f"获取归一化标题失败: {e}")
+            import traceback
+            self.logger.error(f"详细错误: {traceback.format_exc()}")
+            return None
