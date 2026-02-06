@@ -52,6 +52,10 @@ def _ensure_clean_dirs():
     os.makedirs("test_output/debug", exist_ok=True)
     print(f"[目录] 确保目录存在: test_output/, test_output/debug/")
 
+# ------------------------------------------------------------------
+# Utils
+# ------------------------------------------------------------------
+
 def _open_sqlite(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -198,6 +202,154 @@ def _choose_sample_book(books: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
             return b
     return books[0] if books else None
 
+# ------------------------------------------------------------------
+# Test Cases
+# ------------------------------------------------------------------
+@timeit
+def _test_novel_detail(spider: Any, *, novel_url: str, novel_id: str):
+    print("\n" + "=" * 80)
+    print("[测试用例] 小说详情获取测试")
+    print("=" * 80)
+    try:
+        print(f"[参数] 小说URL: {novel_url}")
+        print(f"       小说ID: {novel_id}")
+
+        start_time = time.time()
+        detail = spider.fetch_novel_detail(novel_url, novel_id or "")
+        elapsed_time = time.time() - start_time
+
+        print(f"\n[结果] 获取成功 (耗时: {elapsed_time:.2f}秒)")
+        print(f"  标题: 《{detail.get('title', '')}》")
+        print(f"  作者: {detail.get('author', '')}")
+        print(f"  分类: {detail.get('main_category', '')}")
+        print(f"  状态: {detail.get('status', '')}")
+        print(f"  字数: {detail.get('total_words', 0)}")
+        print(f"  首传日期: {detail.get('first_upload_date', '')}")
+        print(f"  在读人数: {detail.get('reading_count', 0)}")
+        print(f"  标签: {detail.get('tags', [])}")
+
+        return detail
+    except Exception as e:
+        print(f"[错误] fetch_novel_detail 失败: {e}")
+        return {}
+
+@timeit
+def _test_chapters(spider: Any, db: Any, *, novel_url: str, platform_novel_id: str, n: int):
+    print("\n" + "=" * 80)
+    print(f"[测试用例] 章节获取测试 (n={n})")
+    print("=" * 80)
+    try:
+        print(f"[参数] 小说URL: {novel_url}")
+        print(f"       小说ID: {platform_novel_id}")
+        print(f"       目标章节数: {n}")
+
+        start_time = time.time()
+        chapters = spider.fetch_first_n_chapters(novel_url, n=n)
+        elapsed_time = time.time() - start_time
+
+        print(f"\n[结果] 获取成功 (耗时: {elapsed_time:.2f}秒)")
+        print(f"  获取章节数: {len(chapters)}")
+
+        if chapters:
+            # 打印章节详情
+            print(f"\n[章节预览] 前{min(3, len(chapters))}章:")
+            for i, ch in enumerate(chapters[:min(5, len(chapters))], 1):
+                print(f"  {i}. 《{ch.get('chapter_title', '')[:30]}...》")
+                print(f"     字数: {ch.get('word_count', 0)} | 发布日期: {ch.get('publish_date', '')}")
+                preview = (ch.get("chapter_content") or "")[:100].replace("\n", " ")
+                if preview:
+                    print(f"     预览: {preview}...")
+                print()
+
+            # 保存到数据库
+            if hasattr(db, "upsert_first_n_chapters"):
+                print(f"[数据库] 保存 {len(chapters)} 个章节到数据库...")
+
+                # 获取小说信息以便保存
+                novel_info = {}
+                try:
+                    detail = spider.fetch_novel_detail(novel_url, platform_novel_id)
+                    novel_info = {
+                        "title": detail.get("title", ""),
+                        "author": detail.get("author", ""),
+                        "intro": detail.get("intro", ""),
+                        "main_category": detail.get("main_category", ""),
+                        "status": detail.get("status", ""),
+                        "total_words": detail.get("total_words", 0),
+                        "tags": detail.get("tags", []),
+                    }
+                except Exception as e:
+                    print(f"[警告] 获取小说详情失败: {e}")
+                    novel_info = {
+                        "title": "",
+                        "author": "",
+                        "intro": "",
+                        "main_category": "",
+                        "status": "",
+                        "total_words": 0,
+                        "tags": [],
+                    }
+
+                # 使用第一个章节的发布日期，如果没有则使用当前日期
+                publish_date = chapters[0].get("publish_date", datetime.now().strftime("%Y-%m-%d"))
+                print(f"[数据库] 使用发布日期: {publish_date}")
+
+                # 调用数据库保存方法
+                result = db.upsert_first_n_chapters(
+                    platform="fanqie",
+                    platform_novel_id=platform_novel_id,
+                    publish_date=publish_date,
+                    chapters=chapters,
+                    novel_fallback_fields={
+                        "title": novel_info["title"],
+                        "author": novel_info["author"],
+                        "intro": novel_info["intro"],
+                        "main_category": novel_info["main_category"],
+                        "status": novel_info["status"],
+                        "total_words": novel_info["total_words"],
+                        "url": novel_url,
+                        "tags": novel_info["tags"],
+                    },
+                )
+                print(f"[数据库] upsert_first_n_chapters 完成，保存了 {len(chapters)} 个章节")
+        else:
+            print("[警告] 没有获取到章节")
+
+        _print_table_counts(db)
+        return chapters
+    except Exception as e:
+        print(f"[错误] fetch_first_n_chapters 失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+@timeit
+def _test_decryption(spider: Any):
+    print("\n" + "=" * 80)
+    print("[测试用例] 字体解密功能测试")
+    print("=" * 80)
+
+    # 测试样本
+    samples = [
+        "这是一段普通文本",
+        "<div>普通HTML文本</div>",
+        "测试加密字符",  # 假设这是加密的
+    ]
+
+    for s in samples:
+        try:
+            if "<" in s:
+                out = spider._decrypt_html(s)
+                print(f"  HTML解密: {s} -> {out}")
+            else:
+                out = spider._decrypt_text(s)
+                print(f"  文本解密: {s} -> {out}")
+        except Exception as e:
+            print(f"  解密 {s} 时出错: {e}")
+
+# ------------------------------------------------------------------
+# Test Modes
+# ------------------------------------------------------------------
 
 def _test_rank_pipeline_fast(spider: Any, db: Any, *, rank_key: str, pages: int, limit_books: int, top_n: int,
                              chapter_n: int):
@@ -450,149 +602,6 @@ def _test_rank_pipeline(spider: Any, db: Any, *, rank_key: str, pages: int, limi
 
     return result
 
-
-def _test_novel_detail(spider: Any, *, novel_url: str, novel_id: str):
-    print("\n" + "=" * 80)
-    print("[测试用例] 小说详情获取测试")
-    print("=" * 80)
-    try:
-        print(f"[参数] 小说URL: {novel_url}")
-        print(f"       小说ID: {novel_id}")
-
-        start_time = time.time()
-        detail = spider.fetch_novel_detail(novel_url, novel_id or "")
-        elapsed_time = time.time() - start_time
-
-        print(f"\n[结果] 获取成功 (耗时: {elapsed_time:.2f}秒)")
-        print(f"  标题: 《{detail.get('title', '')}》")
-        print(f"  作者: {detail.get('author', '')}")
-        print(f"  分类: {detail.get('main_category', '')}")
-        print(f"  状态: {detail.get('status', '')}")
-        print(f"  字数: {detail.get('total_words', 0)}")
-        print(f"  首传日期: {detail.get('first_upload_date', '')}")
-        print(f"  在读人数: {detail.get('reading_count', 0)}")
-        print(f"  标签: {detail.get('tags', [])}")
-
-        return detail
-    except Exception as e:
-        print(f"[错误] fetch_novel_detail 失败: {e}")
-        return {}
-
-
-def _test_chapters(spider: Any, db: Any, *, novel_url: str, platform_novel_id: str, n: int):
-    print("\n" + "=" * 80)
-    print(f"[测试用例] 章节获取测试 (n={n})")
-    print("=" * 80)
-    try:
-        print(f"[参数] 小说URL: {novel_url}")
-        print(f"       小说ID: {platform_novel_id}")
-        print(f"       目标章节数: {n}")
-
-        start_time = time.time()
-        chapters = spider.fetch_first_n_chapters(novel_url, n=n)
-        elapsed_time = time.time() - start_time
-
-        print(f"\n[结果] 获取成功 (耗时: {elapsed_time:.2f}秒)")
-        print(f"  获取章节数: {len(chapters)}")
-
-        if chapters:
-            # 打印章节详情
-            print(f"\n[章节预览] 前{min(3, len(chapters))}章:")
-            for i, ch in enumerate(chapters[:min(5, len(chapters))], 1):
-                print(f"  {i}. 《{ch.get('chapter_title', '')[:30]}...》")
-                print(f"     字数: {ch.get('word_count', 0)} | 发布日期: {ch.get('publish_date', '')}")
-                preview = (ch.get("chapter_content") or "")[:100].replace("\n", " ")
-                if preview:
-                    print(f"     预览: {preview}...")
-                print()
-
-            # 保存到数据库
-            if hasattr(db, "upsert_first_n_chapters"):
-                print(f"[数据库] 保存 {len(chapters)} 个章节到数据库...")
-
-                # 获取小说信息以便保存
-                novel_info = {}
-                try:
-                    detail = spider.fetch_novel_detail(novel_url, platform_novel_id)
-                    novel_info = {
-                        "title": detail.get("title", ""),
-                        "author": detail.get("author", ""),
-                        "intro": detail.get("intro", ""),
-                        "main_category": detail.get("main_category", ""),
-                        "status": detail.get("status", ""),
-                        "total_words": detail.get("total_words", 0),
-                        "tags": detail.get("tags", []),
-                    }
-                except Exception as e:
-                    print(f"[警告] 获取小说详情失败: {e}")
-                    novel_info = {
-                        "title": "",
-                        "author": "",
-                        "intro": "",
-                        "main_category": "",
-                        "status": "",
-                        "total_words": 0,
-                        "tags": [],
-                    }
-
-                # 使用第一个章节的发布日期，如果没有则使用当前日期
-                publish_date = chapters[0].get("publish_date", datetime.now().strftime("%Y-%m-%d"))
-                print(f"[数据库] 使用发布日期: {publish_date}")
-
-                # 调用数据库保存方法
-                result = db.upsert_first_n_chapters(
-                    platform="fanqie",
-                    platform_novel_id=platform_novel_id,
-                    publish_date=publish_date,
-                    chapters=chapters,
-                    novel_fallback_fields={
-                        "title": novel_info["title"],
-                        "author": novel_info["author"],
-                        "intro": novel_info["intro"],
-                        "main_category": novel_info["main_category"],
-                        "status": novel_info["status"],
-                        "total_words": novel_info["total_words"],
-                        "url": novel_url,
-                        "tags": novel_info["tags"],
-                    },
-                )
-                print(f"[数据库] upsert_first_n_chapters 完成，保存了 {len(chapters)} 个章节")
-        else:
-            print("[警告] 没有获取到章节")
-
-        _print_table_counts(db)
-        return chapters
-    except Exception as e:
-        print(f"[错误] fetch_first_n_chapters 失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
-
-
-def _test_decryption(spider: Any):
-    print("\n" + "=" * 80)
-    print("[测试用例] 字体解密功能测试")
-    print("=" * 80)
-
-    # 测试样本
-    samples = [
-        "这是一段普通文本",
-        "<div>普通HTML文本</div>",
-        "测试加密字符",  # 假设这是加密的
-    ]
-
-    for s in samples:
-        try:
-            if "<" in s:
-                out = spider._decrypt_html(s)
-                print(f"  HTML解密: {s} -> {out}")
-            else:
-                out = spider._decrypt_text(s)
-                print(f"  文本解密: {s} -> {out}")
-        except Exception as e:
-            print(f"  解密 {s} 时出错: {e}")
-
-
 def run_comprehensive_fanqie_test(
         *,
         test_cases: Optional[List[str]] = None,
@@ -814,7 +823,7 @@ def run_quick_test(rank_keys=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="番茄小说爬虫综合测试 (数据库支持)")
+    parser = argparse.ArgumentParser(description="番茄小说爬虫综合测试")
     parser.add_argument(
         "--test",
         type=str,
@@ -829,10 +838,10 @@ if __name__ == "__main__":
                         help="启用章节获取测试（默认：启用）")
     parser.add_argument("--no_fetch_chapters", action="store_false", dest="fetch_chapters",
                         help="禁用章节获取测试")
-    parser.add_argument("--chapter_n", type=int, default=2, help="每本小说获取的章节数")
+    parser.add_argument("--chapter_n", type=int, default=2, help="每本小说获取的章节数（默认：2）")
     parser.add_argument("--rank_key", type=str, default="read_western_fantasy", help="rank_urls中的榜单键")
-    parser.add_argument("--rank_keys", type=str, default="",
-                        help="多个榜单键，用逗号分隔（如：read_western_fantasy,hot,new）")
+    parser.add_argument("--rank_keys", type=str, default="read_western_fantasy",
+                        help="多个榜单键，用逗号分隔（默认：阅读榜·西方奇幻）")
     parser.add_argument("--verbose", action="store_true", help="详细输出模式")
 
     args = parser.parse_args()

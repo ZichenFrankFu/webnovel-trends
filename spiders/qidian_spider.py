@@ -850,7 +850,7 @@ class QidianSpider(BaseSpider):
     def _extract_category_from_detail(self, soup: BeautifulSoup) -> str:
         """从详情页提取完整的分类信息（主分类·子分类）"""
         try:
-            self.logger.info("开始提取分类信息...")
+            self.logger.info("[详情页]开始提取分类信息...")
 
             # 方法1：优先从 book-attribute 中提取分类信息
             # 根据HTML结构：<p class="book-attribute"> ... <a>都市</a><span class="dot">·</span><a>异术超能</a> ...
@@ -1388,16 +1388,16 @@ class QidianSpider(BaseSpider):
         chapter_links = []
 
         try:
-            self.logger.info("开始提取章节链接...")
+            self.logger.info("[章节获取]开始提取章节链接...")
 
             # 方法1：使用精确路径
             catalog_all = soup.select_one('div.catalog-all')
             if catalog_all:
                 # 找到所有的catalog-volume
                 catalog_volumes = catalog_all.select('div.catalog-volume')
-                self.logger.info(f'找到 {len(catalog_volumes)} 个分卷')
+                self.logger.info(f'[章节获取]找到 {len(catalog_volumes)} 个分卷')
 
-                # 寻找第一个有效分卷（章节数>=15的正文卷）
+                # 寻找第一个有效分卷（章节数>=20的正文卷）
                 target_volume = None
                 for volume_index, volume in enumerate(catalog_volumes):
                     volume_title_elem = volume.select_one('h3.volume-title')
@@ -1405,43 +1405,43 @@ class QidianSpider(BaseSpider):
 
                     # 跳过"作品相关"卷
                     if '作品相关' in volume_title:
-                        self.logger.info(f'跳过作品相关卷: {volume_title}')
+                        self.logger.info(f'[章节获取]跳过作品相关卷: {volume_title}')
                         continue
 
                     # 查找章节列表
                     chapters_list = volume.select_one('ul.volume-chapters')
                     if not chapters_list:
-                        self.logger.warning(f'分卷 {volume_index + 1} ({volume_title}) 没有找到volume-chapters')
+                        self.logger.warning(f'[章节获取]分卷 {volume_index + 1} ({volume_title}) 没有找到volume-chapters')
                         continue
 
                     # 获取所有章节项
                     chapter_items = chapters_list.select('li.chapter-item')
                     chapter_count = len(chapter_items)
-                    self.logger.info(f'分卷 {volume_index + 1} ({volume_title}) 有 {chapter_count} 个章节')
+                    self.logger.info(f'[章节获取]分卷 {volume_index + 1} ({volume_title}) 有 {chapter_count} 个章节')
 
-                    # 判断分卷是否有效：章节数>=15
-                    if chapter_count < 15:
+                    # 判断分卷是否有效：章节数>=20
+                    if chapter_count < 20:
                         self.logger.warning(
-                            f'分卷 {volume_index + 1} ({volume_title}) 章节数{chapter_count} < 15，跳过此分卷')
+                            f'[章节获取]分卷 {volume_index + 1} ({volume_title}) 章节数{chapter_count} < 20，跳过此分卷')
                         continue
                     else:
                         target_volume = volume
-                        self.logger.info(f'找到有效分卷: {volume_title} (章节数: {chapter_count})')
+                        self.logger.info(f'[章节获取]找到有效分卷: {volume_title} (章节数: {chapter_count})')
                         break
 
                 if not target_volume:
-                    self.logger.warning('未找到有效分卷（章节数>=15）')
+                    self.logger.warning('[章节获取]未找到有效分卷（章节数>=20）')
                     return []
 
                 # 查找目标卷的章节列表
                 chapters_list = target_volume.select_one('ul.volume-chapters')
                 if not chapters_list:
-                    self.logger.warning('正文卷没有找到volume-chapters')
+                    self.logger.warning('[章节获取]正文卷没有找到volume-chapters')
                     return []
 
                 # 获取所有章节项
                 chapter_items = chapters_list.select('li.chapter-item')
-                self.logger.info(f'正文卷有 {len(chapter_items)} 个章节')
+                self.logger.info(f'[章节获取]正文卷有 {len(chapter_items)} 个章节')
 
                 for item_index, item in enumerate(chapter_items):
                     try:
@@ -1455,7 +1455,7 @@ class QidianSpider(BaseSpider):
 
                         # 提取title属性中的信息
                         title_attr = chapter_link.get('title', '')
-                        self.logger.debug(f'章节链接title属性: {title_attr}')
+                        self.logger.debug(f'[章节获取]章节链接title属性: {title_attr}')
 
                         # 如果没有href，尝试其他方式
                         if not href:
@@ -1491,7 +1491,7 @@ class QidianSpider(BaseSpider):
                                         date_str = re.sub(r'[^\d-]', '', date_str)
                                         if len(date_str) >= 10:  # YYYY-MM-DD
                                             first_post_time = date_str[:10]
-                                            self.logger.debug(f'从title属性提取到发布时间: {first_post_time}')
+                                            self.logger.debug(f'[章节获取]从title属性提取到发布时间: {first_post_time}')
                                             break
 
                                 # 提取字数
@@ -1505,7 +1505,7 @@ class QidianSpider(BaseSpider):
                                     if word_match:
                                         try:
                                             word_count = int(word_match.group(1))
-                                            self.logger.debug(f'从title属性提取到字数: {word_count}')
+                                            self.logger.debug(f'[章节获取]从title属性提取到字数: {word_count}')
                                             break
                                         except ValueError:
                                             continue
@@ -1527,7 +1527,7 @@ class QidianSpider(BaseSpider):
                                         extracted_name = extracted_name.strip()
                                         if extracted_name and len(extracted_name) > 1:
                                             chapter_name = extracted_name
-                                            self.logger.debug(f'从title属性提取到章节名: {chapter_name}')
+                                            self.logger.debug(f'[章节获取]从title属性提取到章节名: {chapter_name}')
                                             break
 
                             # 如果没有从title属性提取到章节名，使用link_text
@@ -1565,11 +1565,11 @@ class QidianSpider(BaseSpider):
 
                             # 如果已经找到足够多的章节，可以提前退出
                             if len(chapter_links) >= 30:  # 多找一些，以防后面有无效链接
-                                self.logger.info(f'已找到足够章节，停止在当前分卷搜索')
+                                self.logger.info(f'[章节获取]已找到足够章节，停止在当前分卷搜索')
                                 break
 
                     except Exception as e:
-                        self.logger.debug(f'解析章节链接失败: {e}')
+                        self.logger.debug(f'[章节获取]解析章节链接失败: {e}')
                         continue
 
                     # 如果已经找到足够章节，跳出循环
@@ -1597,19 +1597,19 @@ class QidianSpider(BaseSpider):
 
         # 记录前3个章节的信息用于调试
         for i, (title, url, date, words) in enumerate(unique_chapters[:3], 1):
-            self.logger.info(f'章节{i}: 标题="{title}", 时间={date}, 字数={words}')
+            self.logger.info(f'[章节获取]章节{i}: 标题="{title}", 时间={date}, 字数={words}')
 
         return unique_chapters
 
     def _parse_chapter_content(self, soup: BeautifulSoup) -> Optional[str]:
         """提取章节正文内容"""
         try:
-            # 方法1: 使用新路径 div.app -> div.reader -> div.reader-content -> div.chapter-wrapper -> .relative -> .print -> .content -> .content-text
+            # 方法1: 使用具体路径 div.app -> div.reader -> div.reader-content -> div.chapter-wrapper -> .relative -> .print -> .content -> .content-text
             content_text_elements = soup.select(
                 'div.app div.reader div.reader-content div.chapter-wrapper .relative .print .content .content-text')
 
             if content_text_elements:
-                self.logger.info(f'使用新路径找到 {len(content_text_elements)} 个 content-text 元素')
+                self.logger.info(f'[章节文本parse]使用具体路径找到 {len(content_text_elements)} 个 content-text 元素')
 
                 # 提取每个 content-text 的文本
                 paragraphs = []
@@ -1621,14 +1621,14 @@ class QidianSpider(BaseSpider):
                 # 将所有段落合并成一整章
                 if paragraphs:
                     full_content = '\n'.join(paragraphs)
-                    self.logger.debug(f'合并后章节内容长度: {len(full_content)} 字符')
+                    self.logger.debug(f'[章节文本parse]合并后章节内容长度: {len(full_content)} 字符')
                     return full_content
 
             # 方法2: 尝试简化的路径
             if not content_text_elements:
                 content_text_elements = soup.select('.content-text')
                 if content_text_elements:
-                    self.logger.info(f'使用简化路径找到 {len(content_text_elements)} 个 content-text 元素')
+                    self.logger.info(f'[章节文本parse]使用简化路径找到 {len(content_text_elements)} 个 content-text 元素')
 
                     paragraphs = []
                     for elem in content_text_elements:
@@ -1638,7 +1638,7 @@ class QidianSpider(BaseSpider):
 
                     if paragraphs:
                         full_content = '\n'.join(paragraphs)
-                        self.logger.debug(f'合并后章节内容长度: {len(full_content)} 字符')
+                        self.logger.debug(f'[章节文本parse]合并后章节内容长度: {len(full_content)} 字符')
                         return full_content
 
             # 方法3: 回退到原来的选择器
@@ -1802,7 +1802,7 @@ class QidianSpider(BaseSpider):
                 first_chapter_info = chapter_infos[0]
                 chapter_url = first_chapter_info[1]  # 第二个元素是URL
 
-                self.logger.info(f"获取第一章以提取上架时间: {chapter_url}")
+                self.logger.info(f"[章节发布时间]获取第一章以提取上架时间: {chapter_url}")
 
                 # 访问第一章页面
                 chapter_soup = self._get_soup(
@@ -1878,7 +1878,7 @@ class QidianSpider(BaseSpider):
             detail["first_upload_date"] = ""
 
         except Exception as e:
-            self.logger.error(f"提取上架时间失败: {e}")
+            self.logger.error(f"[章节获取]提取上架时间失败: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
             detail["first_upload_date"] = ""
@@ -2185,6 +2185,7 @@ class QidianSpider(BaseSpider):
     # 智能章节补全方法
     # ------------------------------------------------------------------
     """获取数据库中已有章节数量"""
+
     def _get_existing_chapter_count(self, novel_id: str) -> int:
         """
         Args:
@@ -2205,6 +2206,7 @@ class QidianSpider(BaseSpider):
             return 0
 
     """获取数据库中已有章节"""
+
     def _get_existing_chapters(self, novel_id: str, limit: int) -> List[Dict[str, Any]]:
         """获取数据库中已有章节
 
@@ -2227,6 +2229,7 @@ class QidianSpider(BaseSpider):
             return []
 
     """智能获取章节：只抓取缺失的章节"""
+
     def _smart_fetch_chapters(self, novel_url: str, novel_id: str, target_chapter_count: int) -> List[Dict[str, Any]]:
         """智能获取章节：只抓取缺失的章节 - 修复版本"""
 
@@ -2405,7 +2408,9 @@ class QidianSpider(BaseSpider):
         return all_chapters
 
     """格式化已有章节数据"""
-    def _format_existing_chapters(self, existing_chapters: List[Dict[str, Any]], target_count: int) -> List[Dict[str, Any]]:
+
+    def _format_existing_chapters(self, existing_chapters: List[Dict[str, Any]], target_count: int) -> List[
+        Dict[str, Any]]:
         chapters = []
         for i, ch in enumerate(existing_chapters[:target_count], 1):
             chapters.append({
@@ -2419,6 +2424,7 @@ class QidianSpider(BaseSpider):
         return chapters
 
     """合并已有章节和新章节"""
+
     def _merge_chapters(self, existing_chapters: List[Dict[str, Any]],
                         new_chapters: List[Dict[str, Any]],
                         target_count: int) -> List[Dict[str, Any]]:
@@ -2561,7 +2567,6 @@ class QidianSpider(BaseSpider):
             self.logger.error("[章节智能补全] 保存新章节到数据库失败: %s", e)
             import traceback
             self.logger.error("[数据库调试] 完整错误堆栈: %s", traceback.format_exc())
-
     # ------------------------------------------------------------------
     # Enrichment / persistence
     # ------------------------------------------------------------------

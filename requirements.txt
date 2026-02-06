@@ -11,5 +11,5 @@ jieba>=0.42.0
 lxml>=4.9.0
 selenium>=4.15.0
 webdriver-manager>=4.0.0  # 自动管理浏览器驱动
- fonttools>=4.61.1
- threading
+fonttools>=4.61.1
+utils

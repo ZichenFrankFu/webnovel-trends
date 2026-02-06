@@ -285,6 +285,9 @@ python tests/qidian_test.py --test full_pipeline --pages 1 --top_n 2 --fetch_cha
 ##### 3.2.5 测试智能补全
 python tests/qidian_test.py --test enrich --pages 1 --top_n 3 --fetch_chapters --chapter_n 5
 
+##### 3.2.6 测试多个榜单
+python tests/qidian_test.py --test multiple_ranks --pages 1 --top_n 2 --fetch_chapters --chapter_n 3 --rank_keys "hotsales,yuepiao,recom,collect"
+
 #### 3.3. fanqie_test
 ##### 3.3.1 快速测试（基本功能）
 python tests/fanqie_test.py --test quick

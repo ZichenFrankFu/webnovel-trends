@@ -7,11 +7,15 @@ import sqlite3
 import argparse
 from datetime import datetime, timedelta
 from typing import Dict, Any
+from functools import wraps
+from typing import Callable, Any
 
+# 添加项目路径
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-def _project_root() -> str:
-    """Return project root path (webnovel_trends/)."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from config import WEBSITES
 
 
 def _ensure_clean_dirs():
@@ -36,13 +40,23 @@ def _ensure_clean_dirs():
     os.makedirs("test_output/debug", exist_ok=True)
     print(f"[目录] 确保目录存在: test_output/, test_output/debug/")
 
+def timeit(func: Callable) -> Callable:
+    """计时装饰器，用于测量函数执行时间"""
+    @wraps(func)
+    def wrapper(*args, **kwargs) -> Any:
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        elapsed = end_time - start_time
+        print(f"[计时] {func.__name__}: {elapsed:.2f}秒")
+        return result
+    return wrapper
 
 def _open_sqlite(db_path: str) -> sqlite3.Connection:
     """Open sqlite connection for verification queries."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def _print_table_counts(db):
     """Print all table counts using db.get_table_counts()."""
@@ -73,7 +87,6 @@ def _print_table_counts(db):
 
     except Exception as e:
         print(f"获取数据库统计失败: {e}")
-
 
 def _peek_some_rows(db_path: str):
     """Show a few rows from key tables to verify inserts."""
@@ -279,7 +292,7 @@ def _test_fetch_novel_detail(spider, db, novel_url=None, novel_id=None):
     print(f"{'=' * 80}")
 
     if not novel_url and not novel_id:
-        print("⚠没有提供小说URL或ID，跳过测试")
+        print("没有提供小说URL或ID，跳过测试")
         return None
 
     try:
@@ -588,6 +601,173 @@ def _test_all_ranks(spider, db, pages=1, max_books_per_rank=20):
         traceback.print_exc()
         return []
 
+"""测试多个指定榜单"""
+def _test_multiple_ranks(
+    spider,
+    db,
+    rank_keys=None,
+    pages=1,
+    top_n=5,
+    fetch_detail=False,
+    fetch_chapters=False,
+    chapter_n=3,
+):
+    """测试多个指定榜单（修复：多榜时章节存储混乱）
+
+    修复思路：
+    - 多榜时不要在测试里“提前/重复”做 novel_uid 推断、existing_count 判断等逻辑
+    - 每个榜单：抓取 ->（可选）补全（含章节）-> 先保存榜单快照（确保 novel 已入库）-> 再幂等 upsert 章节
+    - upsert_first_n_chapters 自带 ON CONFLICT(novel_uid, chapter_num) 幂等更新，不怕重复写
+    """
+    if rank_keys is None:
+        rank_keys = ["hotsales", "yuepiao", "recom"]
+
+    print(f"\n{'=' * 80}")
+    print("测试: 多个榜单抓取")
+    print(f"{'=' * 80}")
+    print(f"测试配置:")
+    print(f"  - 榜单列表: {rank_keys}")
+    print(f"  - 每榜页数: {pages}")
+    print(f"  - 每榜数量: {top_n}")
+    print(f"  - 获取详情: {'是' if fetch_detail else '否'}")
+    print(f"  - 获取章节: {'是' if fetch_chapters else '否'} (章节数: {chapter_n})")
+    print(f"{'=' * 80}")
+
+    rank_urls = spider.site_config.get("rank_urls", {})
+    print(f"\n爬虫配置中的榜单URLs:")
+    for key, url in rank_urls.items():
+        print(f"  {key}: {url}")
+
+    valid_rank_keys = [key for key in rank_keys if key in rank_urls]
+    invalid_rank_keys = [key for key in rank_keys if key not in rank_urls]
+
+    if invalid_rank_keys:
+        print(f"\n警告: 以下榜单不在配置中，将被跳过: {invalid_rank_keys}")
+
+    if not valid_rank_keys:
+        print("错误: 没有有效的榜单可测试")
+        return {}
+
+    print(f"\n开始测试以下榜单: {valid_rank_keys}")
+
+    all_results = {}
+
+    for rank_key in valid_rank_keys:
+        print(f"\n{'=' * 60}")
+        print(f"开始抓取榜单: {rank_key}")
+        print(f"{'=' * 60}")
+
+        try:
+            original_pages = spider.site_config.get("pages_per_rank", 5)
+            spider.site_config["pages_per_rank"] = pages
+
+            # 1) 抓榜单
+            books = spider.fetch_rank_list(rank_type=rank_key)
+
+            spider.site_config["pages_per_rank"] = original_pages
+
+            if top_n and top_n > 0:
+                books = books[:top_n]
+
+            print(f"抓取到 {len(books)} 本书籍")
+
+            if not books:
+                all_results[rank_key] = {"success": False, "error": "未抓取到数据"}
+                print(f"榜单 '{rank_key}': 未抓取到数据")
+                continue
+
+            # 2) 可选补全（包含章节）
+            if fetch_detail:
+                print("开始补全数据...")
+                books = spider.enrich_rank_items(
+                    books,
+                    max_books=top_n,
+                    fetch_detail=True,
+                    fetch_chapters=fetch_chapters,
+                    chapter_count=chapter_n,
+                )
+                print("补全完成")
+
+            # 3) 先保存榜单快照（确保 novel / titles / tags / rank_entries 入库）
+            snapshot_date = datetime.now().strftime("%Y-%m-%d")
+            source_url = rank_urls.get(rank_key, "")
+            rank_identity = spider.rank_type_map.get(rank_key)
+
+            inserted = db.save_rank_snapshot(
+                platform="qidian",
+                rank_family=rank_identity.rank_family if rank_identity else "未知榜单",
+                rank_sub_cat=rank_identity.rank_sub_cat if rank_identity else "",
+                snapshot_date=snapshot_date,
+                items=books,
+                source_url=source_url,
+                make_title_primary=True,
+            )
+            print(f"榜单 '{rank_key}': 保存 {inserted} 条榜单记录")
+
+            # 4) 再幂等保存章节（仅当补全产出了 first_n_chapters）
+            chapters_saved_total = 0
+            novels_with_chapters = 0
+
+            if fetch_chapters:
+                for book in books:
+                    chapters = book.get("first_n_chapters") or []
+                    if not chapters:
+                        continue
+
+                    # 兼容字段名：platform_novel_id / novel_id
+                    novel_id = (book.get("platform_novel_id") or book.get("novel_id") or "").strip()
+                    if not novel_id:
+                        continue
+
+                    fallback_intro = (book.get("introduction") or book.get("intro") or "").strip()
+
+                    inserted_ch = db.upsert_first_n_chapters(
+                        platform="qidian",
+                        platform_novel_id=novel_id,
+                        publish_date=chapters[0].get("publish_date") if chapters else snapshot_date,
+                        chapters=chapters,
+                        novel_fallback_fields={
+                            "title": book.get("title", "未知"),
+                            "author": book.get("author", "未知"),
+                            "intro": fallback_intro,
+                            "main_category": book.get("main_category", "未知"),
+                            "status": book.get("status", "ongoing"),
+                            "total_words": book.get("total_words", 0),
+                            "url": book.get("url", ""),
+                            "tags": book.get("tags", []),
+                        },
+                    )
+
+                    if inserted_ch > 0:
+                        novels_with_chapters += 1
+                        chapters_saved_total += inserted_ch
+
+                print(
+                    f"榜单 '{rank_key}': 章节写入完成，涉及 {novels_with_chapters} 本书，共 upsert {chapters_saved_total} 章"
+                )
+
+            all_results[rank_key] = {
+                "success": True,
+                "books_count": len(books),
+                "inserted_count": inserted,
+                "novels_with_chapters": novels_with_chapters if fetch_chapters else 0,
+                "chapters_upserted": chapters_saved_total if fetch_chapters else 0,
+            }
+
+        except Exception as e:
+            all_results[rank_key] = {"success": False, "error": str(e)}
+            print(f"榜单 '{rank_key}' 异常: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            if rank_key != valid_rank_keys[-1]:
+                delay = 2
+                print(f"\n等待{delay}秒后继续下一个榜单...")
+                time.sleep(delay)
+
+    return all_results
+
+
 """验证章节是否被正确存储到数据库"""
 def _verify_chapter_storage(db_path: str) -> Dict[str, Any]:
     conn = _open_sqlite(db_path)
@@ -666,7 +846,7 @@ def _verify_chapter_storage(db_path: str) -> Dict[str, Any]:
 
                 results["novels_details"].append(novel_details)
 
-                status = "✅" if count > 0 else "❌"
+                status = "SUCCESS" if count > 0 else "FAIL"
                 print(f"  {status} 小说ID: {novel_id}")
                 print(f"      标题: {title}")
                 print(f"      作者: {author}")
@@ -724,6 +904,7 @@ def run_comprehensive_qidian_test(
         fetch_chapters: bool = False,
         chapter_n: int = 3,
         rank_key: str = "hotsales",
+        rank_keys: list = None,
         max_books_per_test: int = None,
         verbose: bool = True,
 ):
@@ -747,10 +928,19 @@ def run_comprehensive_qidian_test(
     print("起点中文网爬虫 - 全面功能测试 (数据保存到数据库)")
     print("=" * 100)
 
+    # 确保rank_keys是有效的列表
+    if rank_keys is None:
+        rank_keys = ["hotsales", "yuepiao", "recom", "collect"]
+    elif isinstance(rank_keys, str):
+        # 如果是字符串，则解析为列表
+        rank_keys = [key.strip() for key in rank_keys.split(',') if key.strip()]
+
+
     # 显示测试配置
     print(f"\n测试配置:")
     print(f"  - 测试用例: {test_cases or ['all']}")
     print(f"  - 榜单类型: {rank_key}")
+    print(f"  - 多榜单测试: {rank_keys}")
     print(f"  - 抓取页数: {pages}")
     print(f"  - 处理数量: {top_n}")
     print(f"  - 获取详情: {'是' if fetch_detail else '否'}")
@@ -764,7 +954,6 @@ def run_comprehensive_qidian_test(
         test_cases = ['rank_list', 'novel_detail', 'chapters', 'enrich', 'full_pipeline', 'all_ranks']
 
     # 添加项目路径
-    project_root = _project_root()
     sys.path.insert(0, project_root)
 
     # 清理旧文件
@@ -792,7 +981,7 @@ def run_comprehensive_qidian_test(
         "rank_urls": {
             "hotsales": "https://www.qidian.com/rank/hotsales/page{page}/",
             "yuepiao": "https://www.qidian.com/rank/yuepiao/page{page}/",
-            "recommend": "https://www.qidian.com/rank/recommend/page{page}/",
+            "recom": "https://www.qidian.com/rank/recom/page{page}/",
             "collect": "https://www.qidian.com/rank/collect/page{page}/",
             "newbook": "https://www.qidian.com/rank/newbook/page{page}/",
         },
@@ -885,8 +1074,6 @@ def run_comprehensive_qidian_test(
                     'count': len(chapters),
                     'time': time.time() - start_time
                 }
-            else:
-                print("  跳过 - 没有可用的样本小说URL")
 
         elif test_case == 'enrich':
             # 检查是否有榜单数据，如果没有则先抓取
@@ -939,8 +1126,34 @@ def run_comprehensive_qidian_test(
                 'time': time.time() - start_time
             }
 
+        elif test_case == 'multiple_ranks':
+            # 测试多个榜单 - 使用传入的rank_keys参数
+            multi_results = _test_multiple_ranks(
+                spider, db,
+                rank_keys=rank_keys,
+                pages=pages,
+                top_n=top_n,
+                fetch_detail=fetch_detail,
+                fetch_chapters=fetch_chapters,
+                chapter_n=chapter_n,
+            )
+            test_data['multiple_ranks_results'] = multi_results
+            success_count = sum(1 for r in multi_results.values() if r.get('success', False))
+            test_results['multiple_ranks'] = {
+                'success': success_count > 0,
+                'ranks_tested': len(multi_results),
+                'success_count': success_count,
+                'results': multi_results
+            }
+
+
         else:
             print(f"  跳过测试用例 {test_case} (未知的测试类型)")
+
+        # 记录每个测试用例的耗时
+        elapsed = time.time() - start_time
+        test_results[test_case]['elapsed'] = elapsed
+        print(f"  测试用例 '{test_case}' 总耗时: {elapsed:.2f}秒")
 
         # 测试间隔（不是最后一个测试）
         if test_case != test_cases[-1]:
@@ -1020,10 +1233,8 @@ def run_comprehensive_qidian_test(
     conn.close()
 
     # 验证章节存储
-    print(f"\n{'=' * 100}")
     print("章节存储验证")
-    print(f"{'=' * 100}")
-    print(_verify_chapter_storage(db_path))
+    _verify_chapter_storage(db_path)
 
     # 智能抓取统计
     if 'enrich' in test_results and fetch_chapters:
@@ -1078,6 +1289,17 @@ def run_custom_test(args):
     """自定义测试"""
     test_cases = [args.test] if args.test != 'all' else None
 
+    # 修改这里的解析逻辑
+    rank_keys = []
+    if args.rank_keys:
+        # 首先去除空格，然后按逗号分割，再过滤空字符串
+        rank_keys = [key.strip() for key in args.rank_keys.split(',') if key.strip()]
+
+    if not rank_keys:  # 如果为空，使用默认值
+        rank_keys = ["hotsales", "yuepiao", "recom", "collect"]
+
+    print(f"解析到的rank_keys: {rank_keys}")  # 添加调试信息
+
     if args.test == 'quick':
         run_quick_test()
     else:
@@ -1089,6 +1311,7 @@ def run_custom_test(args):
             fetch_chapters=args.fetch_chapters,
             chapter_n=args.chapter_n,
             rank_key=args.rank_key,
+            rank_keys=rank_keys,  # 传递处理后的列表
             max_books_per_test=args.max_books,
             verbose=args.verbose,
         )
@@ -1096,34 +1319,14 @@ def run_custom_test(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="起点中文网爬虫全面功能测试 - 数据保存到数据库",
+        description="起点中文网爬虫综合测试",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-            使用示例:
-              # 快速测试
-              python tests/qidian_test.py --test quick
-            
-              # 完整测试
-              python tests/qidian_test.py --test all --pages 2 --top_n 5
-            
-              # 只测试榜单抓取
-              python tests/qidian_test.py --test rank_list --pages 1 --top_n 3
-            
-              # 测试完整流程（含章节）
-              python tests/qidian_test.py --test full_pipeline --pages 1 --top_n 2 --fetch_chapters --chapter_n 2
-            
-              # 测试所有榜单
-              python tests/qidian_test.py --test all_ranks --pages 1 --top_n 10
-            
-              # 详细模式
-              python tests/qidian_test.py --test all --verbose
-        """
     )
 
     # 测试用例选择
     parser.add_argument("--test", type=str, default="all",
                         choices=['rank_list', 'novel_detail', 'chapters',
-                                 'enrich', 'full_pipeline', 'all_ranks', 'all', 'quick'],
+                                 'enrich', 'full_pipeline', 'all_ranks', 'multiple_ranks', 'all', 'quick'],
                         help="要运行的测试用例")
 
     # 测试参数
@@ -1140,8 +1343,10 @@ if __name__ == "__main__":
     parser.add_argument("--chapter_n", type=int, default=3,
                         help="抓取章节数 (默认: 3)")
     parser.add_argument("--rank_key", type=str, default="hotsales",
-                        choices=['hotsales', 'yuepiao', 'recommend', 'collect', 'newbook'],
+                        choices=['hotsales', 'yuepiao', 'recom', 'collect', 'newbook'],
                         help="榜单类型 (默认: hotsales)")
+    parser.add_argument("--rank_keys", type=str, default="hotsales,yuepiao,recom,collect",
+                        help="多个榜单的键，用逗号分隔 (默认: hotsales,yuepiao,recom,collect)")
     parser.add_argument("--max_books", type=int, default=None,
                         help="每个测试最大处理书籍数 (默认: 使用top_n)")
     parser.add_argument("--verbose", action="store_true",

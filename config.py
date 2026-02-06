@@ -17,6 +17,21 @@ WEBSITES = {
             'newsign': 'https://www.qidian.com/rank/newsign/page{page}/',          # 新人签约新书榜
             'newauthor': 'https://www.qidian.com/rank/newauthor/page{page}/',      # 新人作者新书榜
         },
+        "rank_type_map": {
+            # 常规榜单
+            "yuepiao": {"rank_family": "月票榜", "rank_sub_cat": ""},
+            "hotsales": {"rank_family": "畅销榜", "rank_sub_cat": ""},
+            "readIndex": {"rank_family": "阅读指数榜", "rank_sub_cat": ""},
+            "recom": {"rank_family": "推荐榜", "rank_sub_cat": ""},
+            "collect": {"rank_family": "收藏榜", "rank_sub_cat": ""},
+
+            # 新书榜
+            "signnewbook": {"rank_family": "新书榜", "rank_sub_cat": "签约作者"},
+            "pubnewbook": {"rank_family": "新书榜", "rank_sub_cat": "公众作者"},
+            "newsign": {"rank_family": "新书榜", "rank_sub_cat": "新人签约"},
+            "newauthor": {"rank_family": "新书榜", "rank_sub_cat": "新人作者"},
+        },
+
         'base_url': 'https://www.qidian.com',
         'novel_types': ['玄幻','奇幻',
                         '武侠','仙侠',
