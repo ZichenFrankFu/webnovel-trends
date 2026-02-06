@@ -16,18 +16,19 @@ It also validates DB inserts via DatabaseHandler.save_rank_snapshot and FIRST_N_
 
 import os
 import sys
-import shutil
 import time
 import sqlite3
 import argparse
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from functools import wraps
+from typing import Callable, Any
 
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
-def _project_root() -> str:
-    """Return project root path (repo root)."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
+from config import WEBSITES
 
 def _ensure_clean_dirs():
     """清理旧的测试产物并创建必要的输出目录"""
@@ -51,12 +52,22 @@ def _ensure_clean_dirs():
     os.makedirs("test_output/debug", exist_ok=True)
     print(f"[目录] 确保目录存在: test_output/, test_output/debug/")
 
-
 def _open_sqlite(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
+def timeit(func: Callable) -> Callable:
+    """计时装饰器，用于测量函数执行时间"""
+    @wraps(func)
+    def wrapper(*args, **kwargs) -> Any:
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        elapsed = end_time - start_time
+        print(f"[计时] {func.__name__}: {elapsed:.2f}秒")
+        return result
+    return wrapper
 
 def _print_table_counts(db: Any):
     counts = db.get_table_counts()
@@ -72,7 +83,6 @@ def _print_table_counts(db: Any):
         "first_n_chapters",
     ]:
         print(f"  - {k}: {counts.get(k, 0)}")
-
 
 def _peek_some_rows(db_path: str):
     """查看数据库中的一些记录"""
@@ -188,6 +198,7 @@ def _choose_sample_book(books: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
             return b
     return books[0] if books else None
 
+
 def _test_rank_pipeline_fast(spider: Any, db: Any, *, rank_key: str, pages: int, limit_books: int, top_n: int,
                              chapter_n: int):
     """
@@ -215,6 +226,15 @@ def _test_rank_pipeline_fast(spider: Any, db: Any, *, rank_key: str, pages: int,
     print(f"  每本章节数: {chapter_n}")
     print("-" * 80)
 
+    # 记录各部分时间
+    timings: Dict[str, Any] = {
+        "fetch_rank": 0.0,
+        "chapters": [],
+        "total": 0.0
+    }
+
+    start_total_time = time.time()
+
     # 通过配置控制页数
     spider.site_config["pages_per_rank"] = int(pages)
 
@@ -228,7 +248,7 @@ def _test_rank_pipeline_fast(spider: Any, db: Any, *, rank_key: str, pages: int,
         # 第一步：获取排行榜前limit_books本小说并丰富metadata（不获取章节）
         print(f"\n[步骤2] 获取排行榜前{limit_books}本小说并丰富metadata...")
 
-        start_time = time.time()
+        start_fetch_time = time.time()
         result = spider.fetch_and_save_rank(
             rank_type=rank_key,
             pages=pages,
@@ -238,19 +258,22 @@ def _test_rank_pipeline_fast(spider: Any, db: Any, *, rank_key: str, pages: int,
             snapshot_date=snapshot_date,
             max_books=limit_books,  # 限制处理的小说数量
         )
-        elapsed_time = time.time() - start_time
+        fetch_time = time.time() - start_fetch_time
+        timings["fetch_rank"] = fetch_time
 
         items = result.get("items") or []
         snapshot_id = result.get("snapshot_id")
 
         print(f"[结果] 获取完成")
-        print(f"  耗时: {elapsed_time:.2f}秒")
+        print(f"  耗时: {fetch_time:.2f}秒")
         print(f"  获取小说数: {len(items)}")
         print(f"  快照ID: {snapshot_id}")
 
         if not items:
             print("[警告] 没有获取到任何小说数据")
-            return {"items": [], "snapshot_id": None}
+            total_time = time.time() - start_total_time
+            timings["total"] = total_time
+            return {"items": [], "snapshot_id": None, "timings": timings}
 
         # 第二步：只为前top_n本小说获取章节
         if items and top_n > 0 and chapter_n > 0:
@@ -291,6 +314,7 @@ def _test_rank_pipeline_fast(spider: Any, db: Any, *, rank_key: str, pages: int,
                     start_chapter_time = time.time()
                     chapters = spider.fetch_first_n_chapters(novel_url, n=chapter_n)
                     chapter_elapsed = time.time() - start_chapter_time
+                    timings["chapters"].append(chapter_elapsed)
 
                     if chapters:
                         print(f"       成功获取: {len(chapters)}章")
@@ -362,13 +386,34 @@ def _test_rank_pipeline_fast(spider: Any, db: Any, *, rank_key: str, pages: int,
                 print(f"     URL: {b.get('url', '')[:80]}")
 
         _print_table_counts(db)
-        return {"items": items, "snapshot_id": snapshot_id}
+
+        total_time = time.time() - start_total_time
+        timings["total"] = total_time
+
+        # 打印详细计时
+        print(f"\n[详细计时] 榜单流程测试:")
+        print(f"  - 榜单获取与丰富: {timings['fetch_rank']:.2f}秒")
+        if timings["chapters"]:
+            total_chapter_time = sum(timings["chapters"])
+            avg_chapter_time = total_chapter_time / len(timings["chapters"])
+            print(f"  - 章节获取:")
+            print(f"     总耗时: {total_chapter_time:.2f}秒")
+            print(f"     平均每本: {avg_chapter_time:.2f}秒")
+            print(f"     每本耗时: {', '.join([f'{t:.2f}' for t in timings['chapters']])}秒")
+        print(f"  - 总计: {total_time:.2f}秒")
+
+        return {"items": items, "snapshot_id": snapshot_id, "timings": timings}
 
     except Exception as e:
         print(f"[错误] 榜单流程快速测试失败: {e}")
         import traceback
         traceback.print_exc()
-        return {"items": [], "snapshot_id": None}
+
+        total_time = time.time() - start_total_time
+        timings["total"] = total_time
+        print(f"[计时] 测试失败，总耗时: {total_time:.2f}秒")
+
+        return {"items": [], "snapshot_id": None, "timings": timings}
 
 
 def _test_rank_pipeline(spider: Any, db: Any, *, rank_key: str, pages: int, limit_books: int, top_n: int,
@@ -393,8 +438,17 @@ def _test_rank_pipeline(spider: Any, db: Any, *, rank_key: str, pages: int, limi
     print("-" * 80)
 
     # 使用快速模式
-    return _test_rank_pipeline_fast(spider, db, rank_key=rank_key, pages=pages, limit_books=limit_books, top_n=top_n,
-                                    chapter_n=chapter_n)
+    result = _test_rank_pipeline_fast(spider, db, rank_key=rank_key, pages=pages, limit_books=limit_books, top_n=top_n,
+                                      chapter_n=chapter_n)
+
+    # 添加一个总计时输出
+    if "timings" in result:
+        timings = result["timings"]
+        print(f"\n[测试小结] 榜单 '{rank_key}' 测试完成:")
+        print(f"  获取小说数: {len(result.get('items', []))}")
+        print(f"  总耗时: {timings.get('total', 0):.2f}秒")
+
+    return result
 
 
 def _test_novel_detail(spider: Any, *, novel_url: str, novel_id: str):
@@ -573,7 +627,6 @@ def run_comprehensive_fanqie_test(
     if not test_cases or "all" in test_cases:
         test_cases = ["rank_pipeline", "novel_detail", "chapters", "decryption"]
 
-    project_root = _project_root()
     sys.path.insert(0, project_root)
     sys.path.insert(0, os.path.join(project_root, "spiders"))
 
@@ -612,38 +665,8 @@ def run_comprehensive_fanqie_test(
         print("[提示] 确保在正确的目录下，并且 spiders 模块可访问")
         return
 
-    # 番茄小说配置
-    fanqie_config: Dict[str, Any] = {
-        "name": "番茄小说",
-        "base_url": "https://fanqienovel.com",
-        "request_delay": 2,
-        "max_retries": 2,
-        "pages_per_rank": int(pages),
-        "chapter_extraction_goal": int(chapter_n),
-        "rank_urls": {
-            "read_western_fantasy": "https://fanqienovel.com/rank/1_2_1141",
-            "hot": "https://fanqienovel.com/rank/1_2_1",  # 热销榜
-            "new": "https://fanqienovel.com/rank/1_2_2",  # 新书榜
-            "recommend": "https://fanqienovel.com/rank/1_2_3",  # 推荐榜
-        },
-        "rank_type_map": {
-            "read_western_fantasy": {"rank_family": "阅读榜", "rank_sub_cat": "西方奇幻"},
-            "hot": {"rank_family": "热销榜", "rank_sub_cat": ""},
-            "new": {"rank_family": "新书榜", "rank_sub_cat": ""},
-            "recommend": {"rank_family": "推荐榜", "rank_sub_cat": ""},
-        },
-        "selenium_specific": {
-            "options": {
-                "headless": True,
-                "window_size": "1920,1080",
-                "disable_gpu": True,
-            },
-            "stealth_mode": True,
-            "timeout": 20,  # 增加超时时间
-            "implicit_wait": 5,
-            "page_load_timeout": 30,
-        },
-    }
+    # 番茄小说配置（从global config引入）
+    fanqie_config = WEBSITES.get("fanqie")
 
     try:
         spider = FanqieSpider(fanqie_config, db)
@@ -763,7 +786,7 @@ def run_comprehensive_fanqie_test(
     print(f"\n[完成] 测试完成")
 
 
-def run_quick_test():
+def run_quick_test(rank_keys=None):
     """快速测试，只测试基本功能"""
     print("=" * 80)
     print("番茄小说爬虫快速测试")
@@ -772,6 +795,12 @@ def run_quick_test():
     print("       耗时较短，适合快速验证爬虫是否正常工作")
     print("-" * 80)
 
+    # 处理rank_keys参数
+    if rank_keys:
+        print(f"[配置] 测试多个榜单: {rank_keys}")
+    else:
+        rank_keys = ["read_western_fantasy"]
+
     run_comprehensive_fanqie_test(
         test_cases=["rank_pipeline", "novel_detail", "chapters", "decryption"],
         pages=1,
@@ -779,7 +808,8 @@ def run_quick_test():
         top_n=1,
         fetch_chapters=True,
         chapter_n=1,
-        rank_key="read_western_fantasy",
+        rank_key=rank_keys[0],  # 使用第一个榜单作为默认
+        rank_keys=rank_keys,  # 传入所有榜单
     )
 
 
@@ -813,7 +843,7 @@ if __name__ == "__main__":
         rank_keys = [k.strip() for k in args.rank_keys.split(",") if k.strip()]
 
     if args.test == "quick":
-        run_quick_test()
+        run_quick_test(rank_keys)  # 传入rank_keys参数
     else:
         tcs = None if args.test == "all" else [args.test]
 

@@ -49,6 +49,20 @@ WEBSITES = {
             'new_urban_brainhole': 'https://fanqienovel.com/rank/1_1_262',      # 新书榜·都市脑洞
             'new_anime': 'https://fanqienovel.com/rank/1_1_718',                # 新书榜·动漫衍生
         },
+        "rank_type_map": {
+            "read_western_fantasy": {"rank_family": "阅读榜", "rank_sub_cat": "西方奇幻"},
+            "read_scifi_apocalypse": {"rank_family": "阅读榜", "rank_sub_cat": "科幻末世"},
+            "read_urban_highmartial": {"rank_family": "阅读榜", "rank_sub_cat": "都市高武"},
+            "read_suspense_brainhole": {"rank_family": "阅读榜", "rank_sub_cat": "悬疑脑洞"},
+            "read_urban_brainhole": {"rank_family": "阅读榜", "rank_sub_cat": "都市脑洞"},
+            "read_anime": {"rank_family": "阅读榜", "rank_sub_cat": "动漫衍生"},
+            "new_western_fantasy": {"rank_family": "新书榜", "rank_sub_cat": "西方奇幻"},
+            "new_scifi_apocalypse": {"rank_family": "新书榜", "rank_sub_cat": "科幻末世"},
+            "new_urban_highmartial": {"rank_family": "新书榜", "rank_sub_cat": "都市高武"},
+            "new_suspense_brainhole": {"rank_family": "新书榜", "rank_sub_cat": "悬疑脑洞"},
+            "new_urban_brainhole": {"rank_family": "新书榜", "rank_sub_cat": "都市脑洞"},
+            "new_anime": {"rank_family": "新书榜", "rank_sub_cat": "动漫衍生"},
+        },
         'base_url': 'https://fanqienovel.com',
         'request_delay': 2,
         'selenium_specific': {
@@ -58,15 +72,22 @@ WEBSITES = {
             'max_scroll_attempts': 10, # 最大滚动尝试次数
         },
         'max_retries': 5,
+        'chapter_extraction_goal':5,
+        'pages_per_rank': 1,
     }
 }
 
 DATABASE = {
     'path': os.path.join(BASE_DIR, 'outputs', 'data', 'novels.db'),
     'tables': {
-        'daily_rank': 'daily_rankings',
-        'novel_info': 'novel_infos',
-        'trend_stats': 'trend_statistics'
+        'novels': 'novels',
+        'novel_titles': 'novel_titles',
+        'tags': 'tags',
+        'novel_tag_map': 'novel_tag_map',
+        'rank_lists': 'rank_lists',
+        'rank_snapshots': 'rank_snapshots',
+        'rank_entries': 'rank_entries',
+        'first_n_chapters': 'first_n_chapters'
     }
 }
 
@@ -119,6 +140,11 @@ SELENIUM_CONFIG = {
     'save_screenshots': False,  # 是否保存截图
     'screenshot_on_error': True,  # 出错时保存截图
     'driver_path': None,  # ChromeDriver路径，None表示自动查找
+
+    # 性能优化配置
+    'disable_images': True,  # 禁用图片加载
+    'disable_css': True,  # 禁用CSS加载
+    'enable_javascript': True,  # 启用JavaScript
 }
 
 # 爬虫通用配置
@@ -130,4 +156,18 @@ CRAWLER_CONFIG = {
     'log_level': 'INFO',
     'cache_enabled': True,
     'cache_expiry': 3600,  # 缓存过期时间(秒)
+
+    # 通用页面爬虫配置
+    'page_fetch': {
+        'max_page_retries': 3,  # 页面获取最大重试次数
+        'page_retry_delay': 2,  # 页面重试延迟(秒)
+        'default_wait_sec': 12,  # 默认等待时间
+    },
+
+    # 章节抓取配置
+    'chapter_fetch': {
+        'max_retries': 3,
+        'delay_between_chapters': (1.0, 3.0),
+        'wait_for_content_sec': 15,
+    },
 }

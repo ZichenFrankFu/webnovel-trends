@@ -371,10 +371,10 @@ class FanqieSpider(BaseSpider):
             self,
             url: str,
             wait_css: Optional[str] = None,
-            wait_sec: int = 15,  # 增加默认等待时间
-            target_count: int = 50,
-            max_scroll_attempts: int = 15,
-            max_retries: int = 3  # 新增：最大重试次数
+            wait_sec: Optional[int] = None,
+            target_count: Optional[int] = None,
+            max_scroll_attempts: Optional[int] = None,
+            max_retries: Optional[int] = None,
     ) -> Optional[BeautifulSoup]:
         """Fetch URL using Selenium with scroll loading and return BeautifulSoup.
 
@@ -392,6 +392,18 @@ class FanqieSpider(BaseSpider):
         if not self.driver:
             self.logger.error("Driver not initialized.")
             return None
+
+        # 从 site_config 的 selenium_specific 中获取滚动配置
+        scroll_config = self.site_config.get("selenium_specific", {})
+
+        if wait_sec is None:
+            wait_sec = 15  # 默认值
+        if target_count is None:
+            target_count = int(scroll_config.get("target_count", 30))
+        if max_scroll_attempts is None:
+            max_scroll_attempts = int(scroll_config.get("max_scroll_attempts", 10))
+        if max_retries is None:
+            max_retries = int(self.site_config.get("max_retries", 3))
 
         for retry in range(max_retries):
             try:
@@ -795,7 +807,7 @@ class FanqieSpider(BaseSpider):
     def _fill_detail_status_words(self, soup: BeautifulSoup, detail: Dict[str, Any], page_url: str = "") -> None:
         """Fill normalized status (ongoing/completed) and total_words from detail page."""
         if page_url:
-            self.logger.info(f"Parsing status and word count from detail page: {page_url}")
+            self.logger.info(f"[数据补完] 正在从详情页获取完本/连载状态以及总字数: {page_url}")
 
         try:
             # 提取状态
