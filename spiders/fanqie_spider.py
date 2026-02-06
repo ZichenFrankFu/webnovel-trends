@@ -12,6 +12,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 from selenium import webdriver
+from selenium.common import TimeoutException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -284,6 +285,60 @@ class FanqieSpider(BaseSpider):
                 return part
         return ""
 
+    def _find_existing_novel_by_metadata(self, author: str, intro: str, title: str = "") -> Optional[Dict[str, Any]]:
+        """通过作者和简介查找已存在的小说
+
+        Args:
+            author: 作者名
+            intro: 简介（使用前200字符进行匹配）
+            title: 小说标题（可选）
+
+        Returns:
+            找到的小说信息，或None
+        """
+        if not self.db_handler:
+            return None
+
+        try:
+            # 简化的简介匹配（使用前200字符）
+            intro_snippet = intro[:200] if intro else ""
+
+            # 尝试通过作者和简介查找
+            if hasattr(self.db_handler, 'find_novel_by_author_and_intro'):
+                return self.db_handler.find_novel_by_author_and_intro(author, intro_snippet)
+
+            # 如果找不到相应方法，返回None
+            return None
+
+        except Exception as e:
+            self.logger.debug(f"通过元数据查找小说失败: {e}")
+            return None
+
+    def _add_enter_from_param(self, url: str) -> str:
+        """给URL添加 enter_from=Rank 参数
+
+        Args:
+            url: 原始URL
+
+        Returns:
+            添加了参数的URL
+        """
+        if not url:
+            return url
+
+        # 检查URL是否已经有查询参数
+        if '?' in url:
+            # 检查是否已经包含 enter_from 参数
+            if 'enter_from=' in url:
+                # 如果已经包含，保持原样
+                return url
+            else:
+                # 添加 enter_from=Rank 参数
+                return f"{url}&enter_from=Rank"
+        else:
+            # 没有查询参数，直接添加
+            return f"{url}?enter_from=Rank"
+
     # ------------------------------------------------------------------
     # Rank type mapping (rank_family / rank_sub_cat)
     # ------------------------------------------------------------------
@@ -316,9 +371,10 @@ class FanqieSpider(BaseSpider):
             self,
             url: str,
             wait_css: Optional[str] = None,
-            wait_sec: int = 12,
+            wait_sec: int = 15,  # 增加默认等待时间
             target_count: int = 50,
-            max_scroll_attempts: int = 15
+            max_scroll_attempts: int = 15,
+            max_retries: int = 3  # 新增：最大重试次数
     ) -> Optional[BeautifulSoup]:
         """Fetch URL using Selenium with scroll loading and return BeautifulSoup.
 
@@ -328,6 +384,7 @@ class FanqieSpider(BaseSpider):
             wait_sec: wait timeout seconds
             target_count: target number of items to load
             max_scroll_attempts: maximum scroll attempts
+            max_retries: maximum retry times for page loading
 
         Returns:
             BeautifulSoup or None on failure.
@@ -336,73 +393,101 @@ class FanqieSpider(BaseSpider):
             self.logger.error("Driver not initialized.")
             return None
 
-        try:
-            self.driver.get(url)
-            self._sleep_human(1, 3)  # 初始加载等待
-
-            if wait_css:
-                try:
-                    WebDriverWait(self.driver, wait_sec).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, wait_css))
-                    )
-                except Exception:
-                    self.logger.debug(f"Wait selector timeout: {wait_css}")
-
-            # 获取初始项目数
+        for retry in range(max_retries):
             try:
-                initial_items = self.driver.find_elements(By.CSS_SELECTOR, ".rank-book-item, .book-item")
-            except:
-                initial_items = []
+                self.logger.info(f"访问页面 (尝试 {retry + 1}/{max_retries}): {url}")
 
-            # 滚动加载逻辑
-            last_height = self.driver.execute_script("return document.body.scrollHeight")
-            no_change_count = 0
+                # 增加页面加载超时时间
+                current_timeout = self.driver.timeouts.page_load
+                self.driver.set_page_load_timeout(30)  # 临时增加页面加载超时
 
-            for attempt in range(max_scroll_attempts):
-                # 滚动到底部
-                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(2)  # 等待新内容加载
+                self.driver.get(url)
+                self._sleep_human(2, 4)  # 增加初始加载等待时间
 
-                # 计算新高度
-                new_height = self.driver.execute_script("return document.body.scrollHeight")
+                # 恢复原始超时设置
+                self.driver.set_page_load_timeout(current_timeout)
 
-                # 检查是否滚动到了底部
-                if new_height == last_height:
-                    no_change_count += 1
-                    if no_change_count >= 3:
-                        self.logger.info(f"连续 {no_change_count} 次滚动高度未变化，停止滚动")
-                        break
-                else:
-                    no_change_count = 0
-                    last_height = new_height
+                if wait_css:
+                    try:
+                        WebDriverWait(self.driver, wait_sec).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, wait_css))
+                        )
+                        self.logger.debug(f"成功等待到元素: {wait_css}")
+                    except Exception as e:
+                        self.logger.warning(f"等待元素超时: {wait_css}, 错误: {e}")
 
-                # 检查是否已达到目标数量（可选）
+                # 滚动加载逻辑
+                last_height = self.driver.execute_script("return document.body.scrollHeight")
+                no_change_count = 0
+                loaded_items = 0
+
+                for attempt in range(max_scroll_attempts):
+                    # 滚动到底部
+                    self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(2.5)  # 增加等待新内容加载的时间
+
+                    # 计算新高度
+                    new_height = self.driver.execute_script("return document.body.scrollHeight")
+
+                    # 检查是否滚动到了底部
+                    if new_height == last_height:
+                        no_change_count += 1
+                        if no_change_count >= 3:
+                            self.logger.info(f"连续 {no_change_count} 次滚动高度未变化，停止滚动")
+                            break
+                    else:
+                        no_change_count = 0
+                        last_height = new_height
+
+                    # 检查是否已达到目标数量
+                    try:
+                        current_items = self.driver.find_elements(By.CSS_SELECTOR, ".rank-book-item, .book-item")
+                        if len(current_items) > loaded_items:
+                            loaded_items = len(current_items)
+                            self.logger.debug(f"滚动后加载项目数: {loaded_items}")
+
+                        if len(current_items) >= target_count:
+                            self.logger.info(f"已达到目标数量 {target_count}，停止滚动")
+                            break
+                    except Exception as e:
+                        self.logger.debug(f"检查项目数时出错: {e}")
+
+                    self.logger.debug(f"滚动第 {attempt + 1} 次，当前高度: {new_height}")
+                    self._sleep_human(1, 2)
+
+                # 获取最终页面源代码
+                html = self.driver.page_source
+                decrypted_html = self._decrypt_html(html)
+
+                # 最终获取所有项目
                 try:
-                    current_items = self.driver.find_elements(By.CSS_SELECTOR, ".rank-book-item, .book-item")
-                    if len(current_items) >= target_count:
-                        self.logger.info(f"已达到目标数量 {target_count}，停止滚动")
-                        break
+                    final_items = self.driver.find_elements(By.CSS_SELECTOR, ".rank-book-item, .book-item")
+                    self.logger.info(f"页面加载完成，共找到 {len(final_items)} 个项目")
                 except:
-                    pass
+                    final_items = []
 
-                self.logger.info(f"滚动第 {attempt + 1} 次，当前高度: {new_height}")
-                self._sleep_human(1, 3)
+                return BeautifulSoup(decrypted_html, "html.parser")
 
-            # 获取最终页面源代码
-            html = self.driver.page_source
-            decrypted_html = self._decrypt_html(html)
+            except TimeoutException as e:
+                self.logger.warning(f"页面加载超时 (尝试 {retry + 1}/{max_retries}): {e}")
+                if retry < max_retries - 1:
+                    self.logger.info(f"等待 {retry + 1} 秒后重试...")
+                    time.sleep(retry + 1)
+                    continue
+                else:
+                    self.logger.error(f"页面加载超时，已达到最大重试次数: {url}")
+                    return None
 
-            # 最终获取所有项目
-            try:
-                final_items = self.driver.find_elements(By.CSS_SELECTOR, ".rank-book-item, .book-item")
-            except:
-                final_items = []
+            except Exception as e:
+                self.logger.error(f"获取页面失败: {url} ; 错误: {e}")
+                if retry < max_retries - 1:
+                    self.logger.info(f"等待 {retry + 1} 秒后重试...")
+                    time.sleep(retry + 1)
+                    continue
+                else:
+                    return None
 
-            return BeautifulSoup(decrypted_html, "html.parser")
-
-        except Exception as e:
-            self.logger.error(f"Failed to fetch page with scroll: {url} ; err={e}")
-            return None
+        return None
 
     # ------------------------------------------------------------------
     # Rank Page Parsing
@@ -550,7 +635,7 @@ class FanqieSpider(BaseSpider):
     # ------------------------------------------------------------------
     # BaseSpider API: fetch_rank_list
     # ------------------------------------------------------------------
-    def fetch_rank_list(self, rank_type: str = "hot") -> List[Dict[str, Any]]:
+    def fetch_rank_list(self, rank_type: str = "", pages: int = 5) -> List[Dict[str, Any]]:
         """Fetch a rank list (multi-page) and return standardized items.
 
         Args:
@@ -629,7 +714,7 @@ class FanqieSpider(BaseSpider):
         # 提取作者
         if not detail.get("author"):
             author_elem = soup.select_one('meta[property="og:novel:author"]') or soup.select_one(
-                '.author .author-name-text, .author, .writer, .author-name'
+                '.author-name:not(.author-desc), .author-name-text:not(.author-desc)'
             )
             if author_elem:
                 if author_elem.name == "meta":
@@ -859,9 +944,13 @@ class FanqieSpider(BaseSpider):
         if pid and pid in self.book_cache:
             return self.book_cache[pid]
 
+        # 给URL添加 enter_from=Rank 参数
+        detail_url = self._add_enter_from_param(novel_url)
+        self.logger.info(f"访问详情页: {detail_url}")
+
         # 访问详情页
         soup = self._get_soup_with_scroll(
-            novel_url,
+            detail_url,  # 使用添加了参数的URL
             wait_css=".info-name h1, h1, .title, .book-title",
             wait_sec=15,
             target_count=0,  # 详情页不需要滚动加载
@@ -887,7 +976,7 @@ class FanqieSpider(BaseSpider):
         detail: Dict[str, Any] = {
             "platform": "fanqie",
             "platform_novel_id": pid,
-            "url": novel_url,
+            "url": novel_url,  # 原始URL
             "title": "",
             "author": "",
             "intro": "",
@@ -901,7 +990,7 @@ class FanqieSpider(BaseSpider):
 
         self._fill_detail_title_author_intro(soup, detail)
         self._fill_detail_category_tags(soup, detail)
-        self._fill_detail_status_words(soup, detail)
+        self._fill_detail_status_words(soup, detail, page_url=detail_url)
         self._extract_first_upload_date(soup, detail)
 
         # 提取阅读数（如果详情页有）
@@ -1221,7 +1310,7 @@ class FanqieSpider(BaseSpider):
         # 从URL中提取小说ID
         novel_id = self._extract_novel_id_from_url(novel_url)
 
-        self.logger.info(f'获取小说章节内容: {novel_url} (小说ID: {novel_id}, 章节数: {n})')
+        self.logger.info(f'开始获取小说章节内容: {novel_url} (小说ID: {novel_id}, 目标章节数: {n})')
 
         try:
             # 先获取书籍详情（用于获取标题和上架时间）
@@ -1231,7 +1320,8 @@ class FanqieSpider(BaseSpider):
             novel_title = detail.get('title', '')
             first_upload_date = detail.get('first_upload_date', '')
 
-            self.logger.info(f'获取到上架时间: {first_upload_date}')
+            self.logger.info(f'小说详情已获取: 《{novel_title}》 by {detail.get("author", "未知")}')
+            self.logger.info(f'小说上架时间: {first_upload_date}')
 
             # 检查数据库中已有的章节
             existing_chapter_count = 0
@@ -1240,11 +1330,12 @@ class FanqieSpider(BaseSpider):
             if self.db_handler and hasattr(self.db_handler, 'get_chapters_count'):
                 # 获取数据库中已有的章节数量
                 existing_chapter_count = self.db_handler.get_chapters_count(novel_id)
-                self.logger.info(f'数据库中已有章节数: {existing_chapter_count}')
+                self.logger.info(f'数据库查询: 小说ID {novel_id} 已有章节数: {existing_chapter_count}')
 
                 # 如果已有章节数 >= 目标章节数，直接从数据库加载
                 if existing_chapter_count >= n:
-                    self.logger.info(f'数据库已有{existing_chapter_count}章，足够，直接从数据库加载')
+                    self.logger.info(
+                        f'章节智能补全: 数据库已有{existing_chapter_count}章 >= 目标{n}章，直接从数据库加载')
                     db_chapters = self.db_handler.get_novel_chapters(novel_id, n)
 
                     # 格式化数据库章节数据
@@ -1263,12 +1354,12 @@ class FanqieSpider(BaseSpider):
                 # 如果已有章节，获取已存在的章节信息
                 if existing_chapter_count > 0:
                     existing_chapters = self.db_handler.get_novel_chapters(novel_id, existing_chapter_count)
-                    self.logger.info(f'从数据库加载了{len(existing_chapters)}个现有章节')
+                    self.logger.info(f'章节智能补全: 从数据库加载了{len(existing_chapters)}个现有章节')
 
             # 需要从网站抓取的新章节数
             need_chapter_count = n - existing_chapter_count
             if need_chapter_count <= 0:
-                self.logger.info('不需要抓取新章节')
+                self.logger.info('章节智能补全: 不需要抓取新章节')
                 # 格式化现有章节数据
                 chapters = []
                 for existing_chapter in existing_chapters[:n]:
@@ -1283,27 +1374,30 @@ class FanqieSpider(BaseSpider):
                 return chapters
 
             self.logger.info(
-                f'需要抓取{need_chapter_count}个新章节（已有{existing_chapter_count}章，目标{n}章）')
+                f'章节智能补全: 需要抓取{need_chapter_count}个新章节（已有{existing_chapter_count}章，目标{n}章）'
+            )
 
             # 获取现有的最大章节号
             max_existing_chapter_num = 0
             if existing_chapters:
                 max_existing_chapter_num = max([ch.get('chapter_num', 0) for ch in existing_chapters])
+                self.logger.info(f'现有最大章节号: {max_existing_chapter_num}')
 
             # 构建目录页URL
             catalog_url = f"{novel_url}#Catalog" if "#" not in novel_url else novel_url
 
+            self.logger.info(f'访问目录页: {catalog_url}')
             # 访问目录页获取章节链接
             catalog_soup = self._get_soup_with_scroll(
                 catalog_url,
                 wait_css=".page-directory-content, .chapter-list, .catalog-list",
-                wait_sec=15,
+                wait_sec=20,  # 增加等待时间
                 target_count=0,
                 max_scroll_attempts=0,
             )
 
             if not catalog_soup:
-                self.logger.warning("无法访问目录页")
+                self.logger.warning("无法访问目录页，返回现有章节")
                 # 格式化现有章节数据
                 chapters = []
                 for existing_chapter in existing_chapters[:n]:
@@ -1321,7 +1415,7 @@ class FanqieSpider(BaseSpider):
             chapter_infos = self._extract_chapter_links(catalog_soup, novel_id, need_chapter_count * 2)
 
             if not chapter_infos:
-                self.logger.warning("未找到章节链接")
+                self.logger.warning("未找到章节链接，返回现有章节")
                 # 格式化现有章节数据
                 chapters = []
                 for existing_chapter in existing_chapters[:n]:
@@ -1334,6 +1428,8 @@ class FanqieSpider(BaseSpider):
                         'publish_date': existing_chapter.get('publish_date', first_upload_date),
                     })
                 return chapters
+
+            self.logger.info(f'从目录页提取到 {len(chapter_infos)} 个章节链接')
 
             # 获取前need_chapter_count个非锁定章节
             new_chapters = []
@@ -1364,10 +1460,12 @@ class FanqieSpider(BaseSpider):
                     chapter_data['chapter_url'] = chapter_url
 
                     new_chapters.append(chapter_data)
+                    self.logger.info(f'成功获取章节 {chapter_data["chapter_num"]}: {chapter_data["chapter_title"]}')
 
                     # 章节间延迟
                     if len(new_chapters) < need_chapter_count:
-                        self._sleep_human(1, 3)
+                        self.logger.info(f'章节间延迟 1-2 秒...')
+                        self._sleep_human(1, 2)
                 else:
                     self.logger.warning(f"未能获取章节内容: {chapter_title}")
 
@@ -1401,6 +1499,9 @@ class FanqieSpider(BaseSpider):
             for i, chapter in enumerate(all_chapters, 1):
                 chapter['chapter_num'] = i
 
+            self.logger.info(
+                f'章节智能补全完成: 现有{len(existing_chapters)}章 + 新增{len(new_chapters)}章 = 总计{len(all_chapters)}章')
+
             # 保存新章节到数据库
             if self.db_handler and hasattr(self.db_handler, 'save_novel'):
                 self.logger.info(f'保存{len(new_chapters)}个新章节到数据库')
@@ -1422,7 +1523,7 @@ class FanqieSpider(BaseSpider):
                 # 记录每个章节的发布时间用于调试
                 for i, chapter in enumerate(new_chapters, 1):
                     chapter_publish_date = chapter.get('publish_date', '')
-                    self.logger.info(f'章节{i}的发布时间: {chapter_publish_date}')
+                    self.logger.debug(f'章节{i}的发布时间: {chapter_publish_date}')
 
                 # 只保存新章节
                 self.db_handler.save_novel(novel_data, new_chapters)
@@ -1453,7 +1554,7 @@ class FanqieSpider(BaseSpider):
         out: List[Dict[str, Any]] = []
         for i, book in enumerate(items[:max_books], 1):
             title = book.get('title', '未知')
-            self.logger.info(f"[数据丰富] 处理第{i}/{min(len(items), max_books)}本书: 《{title}》")
+            self.logger.info(f"[数据补完] 处理第{i}/{min(len(items), max_books)}本书: 《{title}》")
             enriched = dict(book)
 
             if fetch_detail:
@@ -1462,7 +1563,7 @@ class FanqieSpider(BaseSpider):
                 # 记录处理前的分类信息
                 original_main = enriched.get("main_category", "")
                 original_tags = enriched.get("tags", [])
-                self.logger.info(f"[数据丰富] 《{title}》 原有分类 - 主分类: '{original_main}', 标签: {original_tags}")
+                self.logger.info(f"[数据补完] 《{title}》 原有分类 - 主分类: '{original_main}', 标签: {original_tags}")
 
                 # 更新所有字段
                 update_fields = ["title", "author", "intro", "status", "total_words", "first_upload_date"]
@@ -1483,10 +1584,10 @@ class FanqieSpider(BaseSpider):
                 detail_tags = detail.get("tags", [])
 
                 if detail_main_cat:
-                    self.logger.info(f"[数据丰富] 使用详情页主分类: '{detail_main_cat}' (替换原有: '{original_main}')")
+                    self.logger.info(f"[数据补完] 使用详情页主分类: '{detail_main_cat}' (替换原有: '{original_main}')")
                     enriched["main_category"] = detail_main_cat
                 else:
-                    self.logger.info(f"[数据丰富] 保留原有主分类: '{original_main}'")
+                    self.logger.info(f"[数据补完] 保留原有主分类: '{original_main}'")
 
                 # 合并标签
                 existing_tags = set(enriched.get("tags", []))
@@ -1494,17 +1595,17 @@ class FanqieSpider(BaseSpider):
                 merged_tags = list(existing_tags.union(new_tags))
 
                 if merged_tags != original_tags:
-                    self.logger.info(f"[数据丰富] 合并标签: {original_tags} + {list(new_tags)} = {merged_tags}")
+                    self.logger.info(f"[数据补完] 合并标签: {original_tags} + {list(new_tags)} = {merged_tags}")
                 enriched["tags"] = merged_tags
 
                 self.logger.info(
-                    f"[数据丰富] 《{title}》 最终分类 - 主分类: '{enriched.get('main_category')}', 标签: {enriched.get('tags', [])}")
+                    f"[数据补完] 《{title}》 最终分类 - 主分类: '{enriched.get('main_category')}', 标签: {enriched.get('tags', [])}")
 
             if fetch_chapters:
                 chapters = self.fetch_first_n_chapters(enriched.get("url", ""), n=chapter_count)
                 if chapters:
                     enriched["first_n_chapters"] = chapters
-                    self.logger.info(f"[数据丰富] 《{title}》 获取到 {len(chapters)} 章内容")
+                    self.logger.info(f"[数据补完] 《{title}》 获取到 {len(chapters)} 章内容")
 
             out.append(enriched)
             self._sleep_human(1, 3)

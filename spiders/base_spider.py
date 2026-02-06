@@ -338,7 +338,7 @@ class BaseSpider(ABC):
             return None
 
     @abstractmethod
-    def fetch_rank_list(self, rank_type: str = 'hot', pages: int = 5) -> List[Dict[str, Any]]:
+    def fetch_rank_list(self, rank_type: str = '', pages: int = 5) -> List[Dict[str, Any]]:
         """获取榜单数据
 
         Args:

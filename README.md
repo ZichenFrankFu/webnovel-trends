@@ -265,35 +265,38 @@ erDiagram
 
 
 ### 3. 快捷方式
-#### 1. 安装依赖
+#### 3.1. 安装依赖
 ```bash
 pip install -r requirements.txt
 ```
-#### 2. qidian_test
-##### 快速测试（基本功能）
+#### 3.2. qidian_test
+##### 3.2.1 快速测试（基本功能）
 python tests/qidian_test.py --test quick
 
-##### 完整测试（所有功能）
+##### 3.2.2 完整测试（所有功能）
 python tests/qidian_test.py --test all --pages 2 --top_n 5 --verbose
 
-##### 只测试榜单抓取（前3本书，1页）
+##### 3.2.3 只测试榜单抓取（前3本书，1页）
 python tests/qidian_test.py --test rank_list --pages 1 --top_n 3
 
-##### 测试完整流程（含章节抓取）
+##### 3.2.4 测试完整流程（含章节抓取）
 python tests/qidian_test.py --test full_pipeline --pages 1 --top_n 2 --fetch_chapters --chapter_n 2
 
-##### 测试智能补全
+##### 3.2.5 测试智能补全
 python tests/qidian_test.py --test enrich --pages 1 --top_n 3 --fetch_chapters --chapter_n 5
 
-#### 3. fanqie_test
-##### 快速测试
+#### 3.3. fanqie_test
+##### 3.3.1 快速测试（基本功能）
 python tests/fanqie_test.py --test quick
 
-##### 测试所有功能（榜单、详情、丰富数据、解密等）
-python tests/fanqie_test.py --test all
+##### 3.3.2 完整测试（所有功能）
+python tests/fanqie_test.py --test all --pages 2 --limit_books 10 --top_n 5 --chapter_n 3
 
-##### 只测试榜单抓取
-python tests/fanqie_test.py --test rank_list
+##### 3.3.3 测试完整流程（含章节抓取）
+python tests/fanqie_test.py --test rank_pipeline --pages 1 --limit_books 3 --top_n 2 --fetch_chapters --chapter_n 2
 
-##### 测试章节抓取
-python tests/fanqie_test.py --test chapters --fetch_chapters --chapter_n 3
+##### 3.3.4 测试智能补全和去重
+python tests/fanqie_test.py --test all --pages 1 --limit_books 3 --top_n 2 --fetch_chapters --chapter_n 5 --rank_key read_western_fantasy
+
+##### 3.3.5 测试多个榜单
+python tests/fanqie_test.py --test quick --rank_keys "read_western_fantasy,read_scifi_apocalypse,new_urban_highmartial"
