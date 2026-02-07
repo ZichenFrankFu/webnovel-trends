@@ -414,6 +414,92 @@ def run_multi_ranks(*, rank_keys: List[str], pages: int, top_n: int, chapter_n: 
             pass
 
 
+def run_smart_fetch(*, rank_key: str, pages: int, chapter_n1: int, chapter_n2: int, verbose: bool = False) -> None:
+    """
+    Smart-fetch experiment (DB-backed):
+    - fetch one rank
+    - pick top #1 book
+    - fetch detail metadata
+    - fetch chapters twice with different target chapter_n.
+    Expectation: if spider/DB layer supports intelligent completion, the 2nd run should
+    fetch only the delta and be faster.
+    """
+    print_header(
+        "[Test] smart_fetch - 同一本书两次抓取不同 chapter_n（验证智能补全/去重抓取）",
+        params={
+            "rank_key": rank_key,
+            "pages": pages,
+            "chapter_n1": chapter_n1,
+            "chapter_n2": chapter_n2,
+        },
+    )
+
+    if chapter_n2 < chapter_n1:
+        print(f"[WARN] chapter_n2 ({chapter_n2}) < chapter_n1 ({chapter_n1})，自动交换以保证递增")
+        chapter_n1, chapter_n2 = chapter_n2, chapter_n1
+
+    db_path = _ensure_clean_dirs()
+    db = init_db(db_path, is_test=True)
+    spider = None
+    snapshot_date = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        spider = _init_spider(db=db)
+
+        items, t_rank = _step_fetch_rank(spider, rank_key=rank_key, pages=pages)
+        items = (items or [])[:1]
+        print(f"[计时] fetch_rank_list: {fmt_sec(t_rank)} | picked={len(items)}")
+
+        book = pick_first(items)
+        if not book:
+            print("[结果] 未获取到榜单作品")
+            return
+
+        pid = safe_pid(book)
+        url = book.get("url", "")
+        print(f"\n[样本] 《{safe_trunc(book.get('title',''),40)}》 pid={pid}")
+
+        with Timer("fetch_novel_detail") as t_det:
+            detail = spider.fetch_novel_detail(url, pid, seed=book)
+        print(f"[计时] fetch_novel_detail: {fmt_sec(t_det.elapsed)}")
+
+        # run#1 chapters
+        chapters1, t_ch1 = _step_fetch_chapters(spider, novel_url=url, target_chapter_count=chapter_n1)
+        print(f"[计时] fetch_first_n_chapters #1: {fmt_sec(t_ch1)} | chapters={len(chapters1)} | target={chapter_n1}")
+
+        t_db1 = _step_db_upsert_chapters(db, book=detail or book, chapters=chapters1, snapshot_date=snapshot_date)
+        if t_db1 > 0:
+            print(f"[计时] db_upsert_first_n_chapters #1: {fmt_sec(t_db1)}")
+
+        # run#2 chapters
+        chapters2, t_ch2 = _step_fetch_chapters(spider, novel_url=url, target_chapter_count=chapter_n2)
+        print(f"[计时] fetch_first_n_chapters #2: {fmt_sec(t_ch2)} | chapters={len(chapters2)} | target={chapter_n2}")
+
+        t_db2 = _step_db_upsert_chapters(db, book=detail or book, chapters=chapters2, snapshot_date=snapshot_date)
+        if t_db2 > 0:
+            print(f"[计时] db_upsert_first_n_chapters #2: {fmt_sec(t_db2)}")
+
+        print("\n[对比结果]")
+        print(f"  - run#1 target={chapter_n1}: {fmt_sec(t_ch1)}")
+        print(f"  - run#2 target={chapter_n2}: {fmt_sec(t_ch2)}")
+        diff = t_ch1 - t_ch2
+        if diff > 0:
+            print(f"  - 预期现象: 第二次更快 (Δ={diff:.2f}s)")
+        else:
+            print(f"  - 注意: 第二次未明显更快 (Δ={diff:.2f}s)。若 spider 内部未实现智能补全，则属正常。")
+
+        print_db_counts(db)
+        print(f"\n[输出] 数据库文件: {db_path}")
+
+    finally:
+        try:
+            if spider:
+                spider.close()
+        except Exception:
+            pass
+
+
+
 # ------------------------------------------------------------------
 # CLI
 # ------------------------------------------------------------------
@@ -425,13 +511,17 @@ def main():
     parser.add_argument(
         "--test",
         required=True,
-        choices=["decryption", "quick", "full", "multi_ranks"],
+        choices=["decryption", "quick", "full", "multi_ranks", "smart_fetch"],
         help="Test mode: decryption | quick | full | multi_ranks",
     )
 
     parser.add_argument("--pages", type=int, default=1, help="Pages to fetch for rank list (default: 1)")
     parser.add_argument("--top_n", type=int, default=None, help="Top N books to process per rank (default depends on --test)")
     parser.add_argument("--chapter_n", type=int, default=None, help="Chapters to fetch per book (default depends on --test)")
+
+    # Smart fetch experiment
+    parser.add_argument("--chapter_n1", type=int, default=3, help="Smart fetch: first run target chapters (default: 3)")
+    parser.add_argument("--chapter_n2", type=int, default=4, help="Smart fetch: second run target chapters (default: 4)")
 
     if rank_choices:
         parser.add_argument("--rank_key", type=str, default=_default_rank_key(rank_choices), choices=rank_choices,
@@ -464,6 +554,11 @@ def main():
         chapter_n = args.chapter_n if args.chapter_n is not None else 3
         rank_keys = [x.strip() for x in (args.rank_keys or "").split(",") if x.strip()]
         run_multi_ranks(rank_keys=rank_keys, pages=args.pages, top_n=top_n, chapter_n=chapter_n, verbose=args.verbose)
+        return
+
+
+    if args.test == "smart_fetch":
+        run_smart_fetch(rank_key=args.rank_key, pages=args.pages, chapter_n1=args.chapter_n1, chapter_n2=args.chapter_n2, verbose=args.verbose)
         return
 
     if args.test == "decryption":
