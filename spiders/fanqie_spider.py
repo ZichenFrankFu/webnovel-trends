@@ -291,11 +291,9 @@ class FanqieSpider(BaseSpider):
             # 没有查询参数，直接添加
             return f"{url}?enter_from=Rank"
 
-    # ------------------------------------------------------------------
-    # Rank type mapping (rank_family / rank_sub_cat)
-    # ------------------------------------------------------------------
+    """Build mapping from config rank_type to normalized RankIdentity."""
     def _build_rank_type_map(self) -> Dict[str, RankIdentity]:
-        """Build mapping from config rank_type to normalized RankIdentity."""
+        # 首先检查 site_config 中的自定义映射
         custom = self.site_config.get("rank_type_map")
         if isinstance(custom, dict) and custom:
             out: Dict[str, RankIdentity] = {}
@@ -306,152 +304,85 @@ class FanqieSpider(BaseSpider):
                 )
             return out
 
-        # 番茄小说常见的榜单类型
-        return {
-            "hot": RankIdentity("热销榜"),
-            "new": RankIdentity("新书榜"),
-            "recommend": RankIdentity("推荐榜"),
-            "collect": RankIdentity("收藏榜"),
-            "vip": RankIdentity("VIP榜"),
-            "finish": RankIdentity("完结榜"),
-        }
+        # 然后尝试从 config.WEBSITES 中获取
+        try:
+            from config import WEBSITES
+            qidian_config = WEBSITES.get("qidian", {})
+            if qidian_config:
+                config_rank_type_map = qidian_config.get("rank_type_map")
+                if isinstance(config_rank_type_map, dict) and config_rank_type_map:
+                    out: Dict[str, RankIdentity] = {}
+                    for k, v in config_rank_type_map.items():
+                        out[k] = RankIdentity(
+                            rank_family=v.get("rank_family", k),
+                            rank_sub_cat=v.get("rank_sub_cat", "") or "",
+                        )
+                    return out
+        except ImportError:
+            # 如果无法导入 config，则继续使用默认映射
+            pass
+        except Exception as e:
+            self.logger.warning(f"从 config 获取 rank_type_map 失败: {e}")
 
     # ------------------------------------------------------------------
     # Page fetching with scroll loading
     # ------------------------------------------------------------------
-    def _get_soup_with_scroll(
+    def _postprocess_html(self, html: str) -> str:
+        return self._decrypt_html(html)
+
+    def _scroll_load(
             self,
-            url: str,
-            wait_css: Optional[str] = None,
-            wait_sec: Optional[int] = None,
             target_count: Optional[int] = None,
             max_scroll_attempts: Optional[int] = None,
-            max_retries: Optional[int] = None,
-    ) -> Optional[BeautifulSoup]:
-        """Fetch URL using Selenium with scroll loading and return BeautifulSoup.
+            item_css: Optional[str] = None,
+            scroll_pause_sec: Optional[float] = None,
+            no_change_limit: int = 3,
+    ) -> None:
+        scroll_cfg = (self.site_config or {}).get("selenium_specific", {}) or {}
 
-        Args:
-            url: target url
-            wait_css: optional CSS selector to wait for (presence)
-            wait_sec: wait timeout seconds
-            target_count: target number of items to load
-            max_scroll_attempts: maximum scroll attempts
-            max_retries: maximum retry times for page loading
-
-        Returns:
-            BeautifulSoup or None on failure.
-        """
-        if not self.driver:
-            self.logger.error("Driver not initialized.")
-            return None
-
-        # 从 site_config 的 selenium_specific 中获取滚动配置
-        scroll_config = self.site_config.get("selenium_specific", {})
-
-        if wait_sec is None:
-            wait_sec = 15  # 默认值
         if target_count is None:
-            target_count = int(scroll_config.get("target_count", 30))
+            target_count = int(scroll_cfg.get("target_count", 30))
         if max_scroll_attempts is None:
-            max_scroll_attempts = int(scroll_config.get("max_scroll_attempts", 10))
-        if max_retries is None:
-            max_retries = int(self.site_config.get("max_retries", 3))
+            max_scroll_attempts = int(scroll_cfg.get("max_scroll_attempts", 10))
+        if item_css is None:
+            item_css = scroll_cfg.get("item_css", ".rank-book-item, .book-item")
+        if scroll_pause_sec is None:
+            scroll_pause_sec = float(scroll_cfg.get("scroll_pause_sec", 2.5))
 
-        for retry in range(max_retries):
-            try:
-                self.logger.info(f"访问页面 (尝试 {retry + 1}/{max_retries}): {url}")
+        last_height = self.driver.execute_script("return document.body.scrollHeight")
+        no_change_count = 0
+        loaded_items = 0
 
-                # 增加页面加载超时时间
-                current_timeout = self.driver.timeouts.page_load
-                self.driver.set_page_load_timeout(30)  # 临时增加页面加载超时
+        for i in range(max_scroll_attempts):
+            # scroll to bottom
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(scroll_pause_sec)
 
-                self.driver.get(url)
-                self._sleep_human(2, 4)  # 增加初始加载等待时间
+            new_height = self.driver.execute_script("return document.body.scrollHeight")
 
-                # 恢复原始超时设置
-                self.driver.set_page_load_timeout(current_timeout)
-
-                if wait_css:
-                    try:
-                        WebDriverWait(self.driver, wait_sec).until(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, wait_css))
-                        )
-                        self.logger.debug(f"成功等待到元素: {wait_css}")
-                    except Exception as e:
-                        self.logger.warning(f"等待元素超时: {wait_css}, 错误: {e}")
-
-                # 滚动加载逻辑
-                last_height = self.driver.execute_script("return document.body.scrollHeight")
+            if new_height == last_height:
+                no_change_count += 1
+                if no_change_count >= no_change_limit:
+                    self.logger.info(f"滚动高度连续 {no_change_count} 次未变化，停止滚动")
+                    break
+            else:
                 no_change_count = 0
-                loaded_items = 0
+                last_height = new_height
 
-                for attempt in range(max_scroll_attempts):
-                    # 滚动到底部
-                    self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                    time.sleep(2.5)  # 增加等待新内容加载的时间
+            # count loaded items
+            try:
+                current_items = self.driver.find_elements(By.CSS_SELECTOR, item_css)
+                if len(current_items) > loaded_items:
+                    loaded_items = len(current_items)
+                    self.logger.debug(f"滚动后加载项目数: {loaded_items}")
 
-                    # 计算新高度
-                    new_height = self.driver.execute_script("return document.body.scrollHeight")
-
-                    # 检查是否滚动到了底部
-                    if new_height == last_height:
-                        no_change_count += 1
-                        if no_change_count >= 3:
-                            self.logger.info(f"连续 {no_change_count} 次滚动高度未变化，停止滚动")
-                            break
-                    else:
-                        no_change_count = 0
-                        last_height = new_height
-
-                    # 检查是否已达到目标数量
-                    try:
-                        current_items = self.driver.find_elements(By.CSS_SELECTOR, ".rank-book-item, .book-item")
-                        if len(current_items) > loaded_items:
-                            loaded_items = len(current_items)
-                            self.logger.debug(f"滚动后加载项目数: {loaded_items}")
-
-                        if len(current_items) >= target_count:
-                            self.logger.info(f"已达到目标数量 {target_count}，停止滚动")
-                            break
-                    except Exception as e:
-                        self.logger.debug(f"检查项目数时出错: {e}")
-
-                    self.logger.debug(f"滚动第 {attempt + 1} 次，当前高度: {new_height}")
-                    self._sleep_human(1, 2)
-
-                # 获取最终页面源代码
-                html = self.driver.page_source
-                decrypted_html = self._decrypt_html(html)
-
-                # 最终获取所有项目
-                try:
-                    final_items = self.driver.find_elements(By.CSS_SELECTOR, ".rank-book-item, .book-item")
-                    self.logger.info(f"页面加载完成，共找到 {len(final_items)} 个项目")
-                except:
-                    final_items = []
-
-                return BeautifulSoup(decrypted_html, "html.parser")
-
-            except TimeoutException as e:
-                self.logger.warning(f"页面加载超时 (尝试 {retry + 1}/{max_retries}): {e}")
-                if retry < max_retries - 1:
-                    self.logger.info(f"等待 {retry + 1} 秒后重试...")
-                    time.sleep(retry + 1)
-                    continue
-                else:
-                    self.logger.error(f"页面加载超时，已达到最大重试次数: {url}")
-                    return None
-
+                if loaded_items >= target_count:
+                    self.logger.info(f"已达到目标数量 {target_count}，停止滚动")
+                    break
             except Exception as e:
-                self.logger.error(f"获取页面失败: {url} ; 错误: {e}")
-                if retry < max_retries - 1:
-                    self.logger.info(f"等待 {retry + 1} 秒后重试...")
-                    time.sleep(retry + 1)
-                    continue
-                else:
-                    return None
+                self.logger.debug(f"检查项目数出错: {e}")
 
-        return None
+            self._humanlike_sleep(1, 2)
 
     # ------------------------------------------------------------------
     # Rank Page Parsing
@@ -627,12 +558,12 @@ class FanqieSpider(BaseSpider):
 
             self.logger.info(f"Rank[{rank_type}] page {page}/{pages}: {url}")
 
-            soup = self._get_soup_with_scroll(
+            soup = self._get_soup(
                 url,
-                wait_css=".rank-book-item, .book-item",
-                wait_sec=15,
-                target_count=30,
-                max_scroll_attempts=10,
+                wait_css="...",
+                is_scrolling=True,
+                target_count=30,  # 可省略，走 config
+                max_scroll_attempts=10,  # 可省略，走 config
             )
 
             if not soup:
@@ -653,7 +584,7 @@ class FanqieSpider(BaseSpider):
             self.logger.info(f"Page {page}: found {len(page_items)} items, {len(unique_items)} unique")
 
             if page < pages:
-                self._sleep_human(1, 3)
+                self._humanlike_sleep(1, 3)
 
         return all_items
 
@@ -913,12 +844,12 @@ class FanqieSpider(BaseSpider):
         self.logger.info(f"访问详情页: {detail_url}")
 
         # 访问详情页
-        soup = self._get_soup_with_scroll(
-            detail_url,  # 使用添加了参数的URL
-            wait_css=".info-name h1, h1, .title, .book-title",
-            wait_sec=15,
-            target_count=0,  # 详情页不需要滚动加载
-            max_scroll_attempts=0,
+        soup = self._get_soup(
+            detail_url,
+            wait_css="...",
+            is_scrolling=True,
+            target_count=30,  # 可省略，走 config
+            max_scroll_attempts=10,  # 可省略，走 config
         )
 
         if not soup:
@@ -1203,13 +1134,12 @@ class FanqieSpider(BaseSpider):
             # 访问章节页面
             self.logger.info(f'访问章节页面: {chapter_url}')
 
-            # 使用 _get_soup_with_scroll 方法获取页面
-            soup = self._get_soup_with_scroll(
+            soup = self._get_soup(
                 chapter_url,
-                wait_css=".muye-reader-content, .reader-content, .chapter-content",
-                wait_sec=15,
-                target_count=0,
-                max_scroll_attempts=0,
+                wait_css="...",
+                is_scrolling=True,
+                target_count=30,  # 可省略，走 config
+                max_scroll_attempts=10,  # 可省略，走 config
             )
 
             if not soup:
@@ -1352,12 +1282,12 @@ class FanqieSpider(BaseSpider):
 
             self.logger.info(f'访问目录页: {catalog_url}')
             # 访问目录页获取章节链接
-            catalog_soup = self._get_soup_with_scroll(
+            catalog_soup = self._get_soup(
                 catalog_url,
-                wait_css=".page-directory-content, .chapter-list, .catalog-list",
-                wait_sec=20,  # 增加等待时间
-                target_count=0,
-                max_scroll_attempts=0,
+                wait_css="...",
+                is_scrolling=True,
+                target_count=30,  # 可省略，走 config
+                max_scroll_attempts=10,  # 可省略，走 config
             )
 
             if not catalog_soup:
@@ -1429,7 +1359,7 @@ class FanqieSpider(BaseSpider):
                     # 章节间延迟
                     if len(new_chapters) < need_chapter_count:
                         self.logger.info(f'章节间延迟 1-2 秒...')
-                        self._sleep_human(1, 2)
+                        self._humanlike_sleep(1, 2)
                 else:
                     self.logger.warning(f"未能获取章节内容: {chapter_title}")
 
@@ -1572,7 +1502,7 @@ class FanqieSpider(BaseSpider):
                     self.logger.info(f"[数据补完] 《{title}》 获取到 {len(chapters)} 章内容")
 
             out.append(enriched)
-            self._sleep_human(1, 3)
+            self._humanlike_sleep(1, 3)
 
         return out
 

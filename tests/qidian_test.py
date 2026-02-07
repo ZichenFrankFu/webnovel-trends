@@ -4,10 +4,11 @@ import sys
 import time
 import sqlite3
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any
 from functools import wraps
-from typing import Callable, Any
+from typing import Callable
+
 # 添加项目路径
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
@@ -15,6 +16,10 @@ if project_root not in sys.path:
 
 from config import WEBSITES
 
+
+# ------------------------------------------------------------------
+# 测试前准备
+# ------------------------------------------------------------------
 
 def _ensure_clean_dirs():
     """清理旧的测试产物并创建必要的输出目录"""
@@ -930,7 +935,6 @@ def run_comprehensive_qidian_test(
     if rank_keys is None:
         rank_keys = ["hotsales", "yuepiao", "recom", "collect"]
     elif isinstance(rank_keys, str):
-        # 如果是字符串，则解析为列表
         rank_keys = [key.strip() for key in rank_keys.split(',') if key.strip()]
 
 
@@ -996,9 +1000,6 @@ def run_comprehensive_qidian_test(
 
     spider = QidianSpider(qidian_config, db)
     print(f"  爬虫初始化完成")
-    print(f"  默认章节数: {spider.default_chapter_count}")
-    print(f"  榜单类型映射: {list(spider.rank_type_map.keys())}")
-
     # 显示初始数据库状态
     print(f"\n[3/4] 初始数据库状态:")
     _print_table_counts(db)

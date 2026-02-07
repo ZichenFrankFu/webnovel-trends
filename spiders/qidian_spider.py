@@ -16,24 +16,13 @@ Phase 1 目标：
 
 from __future__ import annotations
 
-import os
 import random
 import re
 import time
 from dataclasses import dataclass
-from datetime import date
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import urljoin
-
 from bs4 import BeautifulSoup
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
-
 import config
 from .base_spider import BaseSpider
 
@@ -71,7 +60,9 @@ class QidianSpider(BaseSpider):
             - save_rank_snapshot(...)
             - upsert_first_n_chapters(...)
         """
-        super().__init__(site_config)
+        root_cfg = (getattr(config, "WEBSITES", {}) or {}).get("qidian", {}) or {}
+        merged_cfg = self._deep_merge_dict(root_cfg, site_config or {})
+        super().__init__(merged_cfg, db_handler=db_handler)
 
         self.driver: Optional[webdriver.Chrome] = None
         self.db_handler = db_handler
@@ -87,121 +78,10 @@ class QidianSpider(BaseSpider):
         self.rank_type_map: Dict[str, RankIdentity] = self._build_rank_type_map()
 
     # ------------------------------------------------------------------
-    # Selenium setup
-    # ------------------------------------------------------------------
-    """Merge default Selenium config + global config + site specific overrides."""
-    def _build_selenium_config(self) -> Dict[str, Any]:
-        cfg: Dict[str, Any] = {
-            "enabled": True,
-            "browser": "chrome",
-            "options": {
-                "headless": True,
-                "no_sandbox": True,
-                "disable_dev_shm_usage": True,
-                "disable_gpu": True,
-                "window_size": "1920,1080",
-                "disable_blink_features": "AutomationControlled",
-                "user_agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-            },
-            "experimental_options": {
-                "excludeSwitches": ["enable-automation"],
-                "useAutomationExtension": False,
-            },
-            "timeout": 20,
-            "implicit_wait": 10,
-            "page_load_timeout": 30,
-            "stealth_mode": True,
-            "driver_path": None,
-        }
-
-        cfg.update(GLOBAL_SELENIUM_CONFIG)
-
-        site_specific = self.site_config.get("selenium_specific", {}) or {}
-        for k, v in site_specific.items():
-            if k in cfg and isinstance(cfg[k], dict) and isinstance(v, dict):
-                cfg[k].update(v)
-            else:
-                cfg[k] = v
-        return cfg
-
-    """Initialize Chrome WebDriver with anti-bot friendly options."""
-    def _init_driver(self) -> bool:
-        """
-        Returns:
-            bool: True if driver is initialized, False otherwise.
-        """
-        try:
-            options = Options()
-            cfg_options = self.selenium_config.get("options", {}) or {}
-
-            if cfg_options.get("headless", True):
-                options.add_argument("--headless=new")
-
-            if "window_size" in cfg_options:
-                options.add_argument(f"--window-size={cfg_options['window_size']}")
-            if cfg_options.get("user_agent"):
-                options.add_argument(f"user-agent={cfg_options['user_agent']}")
-            for k, v in cfg_options.items():
-                if k in {"headless", "window_size", "user_agent"}:
-                    continue
-                if isinstance(v, bool) and v:
-                    options.add_argument(f"--{k.replace('_', '-')}")
-                elif isinstance(v, str):
-                    options.add_argument(f"--{k.replace('_', '-')}={v}")
-
-            for k, v in (self.selenium_config.get("experimental_options", {}) or {}).items():
-                options.add_experimental_option(k, v)
-
-            # perf: disable images/css
-            prefs = {
-                "profile.default_content_setting_values": {
-                    "images": 2,
-                    "stylesheet": 2,
-                    "javascript": 1,
-                }
-            }
-            options.add_experimental_option("prefs", prefs)
-
-            if self.selenium_config.get("stealth_mode", True):
-                options.add_argument("--disable-blink-features=AutomationControlled")
-                options.add_experimental_option("excludeSwitches", ["enable-automation"])
-                options.add_experimental_option("useAutomationExtension", False)
-
-            driver_path = self.selenium_config.get("driver_path")
-            if driver_path and os.path.exists(driver_path):
-                service = Service(driver_path)
-            else:
-                service = Service(ChromeDriverManager().install())
-
-            self.driver = webdriver.Chrome(service=service, options=options)
-            self.driver.set_page_load_timeout(int(self.selenium_config.get("page_load_timeout", 30)))
-            self.driver.implicitly_wait(int(self.selenium_config.get("implicit_wait", 10)))
-
-            if self.selenium_config.get("stealth_mode", True):
-                self.driver.execute_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-                )
-
-            self.logger.info("QidianSpider Selenium driver initialized.")
-            return True
-        except Exception as e:
-            self.logger.error(f"Selenium init failed: {e}")
-            if self.retry_count < self.max_retries:
-                self.retry_count += 1
-                time.sleep(2)
-                return self._init_driver()
-            return False
-
-    # ------------------------------------------------------------------
     # Utils
     # ------------------------------------------------------------------
-
+    """Split '大类·副类' into (main_category, sub_as_tag)"""
     def _split_qidian_category(self, raw_category: str) -> Tuple[str, Optional[str]]:
-        """Split '大类·副类' into (main_category, sub_as_tag)."""
         raw = self._normalize_text(raw_category)
         if not raw or raw in {"未知", "未知分类"}:
             return "未知", None
@@ -217,81 +97,98 @@ class QidianSpider(BaseSpider):
             }
 
         # 子分类到主分类的映射（常见的副分类/题材标签）
-        sub_to_main_map = {
-            # 都市相关
-            "异术超能": "都市",
-            "都市生活": "都市",
-            "都市异能": "都市",
-            "都市修真": "都市",
-            "娱乐明星": "都市",
-            "商战职场": "都市",
+        sub_to_main_map = self.site_config.get('sub_to_main_map', {})
+        if not qidian_main_categories:
+            sub_to_main_map = {
+                # 玄幻相关
+                "东方玄幻": "玄幻",
+                "异世大陆": "玄幻",
+                "高武世界": "玄幻",
+                "王朝争霸": "玄幻",
 
-            # 玄幻相关
-            "东方玄幻": "玄幻",
-            "高武世界": "玄幻",
-            "异世大陆": "玄幻",
-            "王朝争霸": "玄幻",
+                # 奇幻相关
+                "剑与魔法": "奇幻",
+                "史诗奇幻": "奇幻",
+                "神秘幻想": "奇幻",
+                "现代魔法": "奇幻",
+                "历史神话": "奇幻",
+                "另类幻想": "奇幻",
 
-            # 仙侠相关
-            "修真文明": "仙侠",
-            "神话修真": "仙侠",
-            "古典仙侠": "仙侠",
-            "现代修真": "仙侠",
-            "幻想修仙": "仙侠",
+                # 武侠相关
+                "传统武侠": "武侠",
+                "武侠幻想": "武侠",
+                "国术无双": "武侠",
+                "古武未来": "武侠",
+                "武侠同人": "武侠",
 
-            # 科幻相关
-            "进化变异": "科幻",
-            "末世危机": "科幻",
-            "时空穿梭": "科幻",
-            "未来世界": "科幻",
-            "星际文明": "科幻",
-            "超级科技": "科幻",
+                # 仙侠相关
+                "修真文明": "仙侠",
+                "幻想修仙": "仙侠",
+                "现代修真": "仙侠",
+                "神话修真": "仙侠",
+                "古典仙侠": "仙侠",
 
-            # 历史相关
-            "历史架空": "历史",
-            "架空历史": "历史",
-            "上古先秦": "历史",
-            "两晋隋唐": "历史",
-            "两宋元明": "历史",
-            "清史民国": "历史",
-            "外国历史": "历史",
+                # 都市相关
+                "都市生活": "都市",
+                "娱乐明星": "都市",
+                "商战职场": "都市",
+                "异术超能": "都市",
+                "都市异能": "都市",
+                "青春校园": "都市",
 
-            # 军事相关
-            "战争幻想": "军事",
-            "军事战争": "军事",
-            "军旅生涯": "军事",
+                # 历史相关
+                "架空历史": "历史",
+                "两宋元明": "历史",
+                "外国历史": "历史",
+                "上古先秦": "历史",
+                "秦汉三国": "历史",
+                "两晋隋唐": "历史",
+                "五代十国": "历史",
+                "清史民国": "历史",
+                "历史传记": "历史",
+                "民间传说": "历史",
 
-            # 游戏相关
-            "游戏异界": "游戏",
-            "电子竞技": "游戏",
-            "虚拟网游": "游戏",
-            "游戏系统": "游戏",
+                # 军事相关
+                "战争幻想": "军事",
+                "谍战特工": "军事",
+                "军旅生涯": "军事",
+                "抗战烽火": "军事",
+                "军事战争": "军事",
 
-            # 体育相关
-            "体育竞技": "体育",
-            "篮球运动": "体育",
-            "足球运动": "体育",
-            "体育赛事": "体育",
+                # 悬疑相关
+                "悬疑侦探": "悬疑",
+                "诡秘悬疑": "悬疑",
+                "探险生存": "悬疑",
+                "奇妙世界": "悬疑",
+                "古今传奇": "悬疑",
 
-            # 悬疑相关
-            "诡秘悬疑": "悬疑",
-            "侦探推理": "悬疑",
-            "奇妙世界": "悬疑",
+                # 科幻相关
+                "星际文明": "科幻",
+                "时空穿梭": "科幻",
+                "未来世界": "科幻",
+                "古武机甲": "科幻",
+                "超级科技": "科幻",
+                "进化变异": "科幻",
+                "末世危机": "科幻",
 
-            # 轻小说相关
-            "原生幻想": "轻小说",
-            "青春日常": "轻小说",
-            "恋爱日常": "轻小说",
-            "搞笑吐槽": "轻小说",
-            "衍生同人": "轻小说",
+                # 游戏相关
+                "电子竞技": "游戏",
+                "虚拟网游": "游戏",
+                "游戏异界": "游戏",
+                "游戏系统": "游戏",
+                "游戏主播": "游戏",
 
-            # 奇幻相关
-            "史诗奇幻": "奇幻",
-            "现代魔法": "奇幻",
-            "黑暗幻想": "奇幻",
-            "剑与魔法": "奇幻",
-        }
+                # 体育相关
+                "体育赛事": "体育",
+                "篮球运动": "体育",
+                "足球运动": "体育",
 
+                # 轻小说相关
+                "原生幻想": "轻小说",
+                "衍生同人": "轻小说",
+                "搞笑吐槽": "轻小说",
+                "恋爱日常": "轻小说",
+            }
         self.logger.debug(f"[分类解析] 开始解析分类: '{raw}'")
 
         # 处理有分隔符的情况
@@ -360,72 +257,12 @@ class QidianSpider(BaseSpider):
                 self.logger.warning(f"[分类解析] 无法识别的分类: '{raw}'")
                 return "未知", raw if raw else None
 
-    """从数据库novel_titles表中获取归一化的标题(title_norm)"""
-    def _get_novel_title_norm_from_db(self, novel_id: str) -> Optional[str]:
-        """从数据库novel_titles表中获取归一化的标题(title_norm)"""
-        if not self.db_handler:
-            return None
-
-        try:
-            # 使用db_handler的get_novel_title_norm方法
-            if hasattr(self.db_handler, 'get_novel_title_norm'):
-                title_norm = self.db_handler.get_novel_title_norm("qidian", novel_id)
-                if title_norm:
-                    self.logger.debug("[标题查询] 从数据库获取到归一化标题: %s (小说ID: %s)", title_norm, novel_id)
-                else:
-                    self.logger.debug("[标题查询] 数据库中未找到归一化标题 (小说ID: %s)", novel_id)
-                return title_norm
-            else:
-                self.logger.warning("[标题查询] db_handler没有get_novel_title_norm方法")
-                return None
-
-        except Exception as e:
-            self.logger.debug("[标题查询] 获取归一化标题失败 (小说ID: %s): %s", novel_id, e)
-
-        return None
-
-    """获取用于显示的标题，优先使用归一化标题"""
-    def _get_display_title(self, novel_id: str, fallback_title: str = "") -> Tuple[str, str]:
-        """
-
-        Args:
-            novel_id: 小说平台ID
-            fallback_title: 后备标题（当无法从数据库获取时使用）
-
-        Returns:
-            Tuple[显示标题, 标题来源]
-        """
-        # 首先尝试从数据库获取归一化标题
-        title_norm = self._get_novel_title_norm_from_db(novel_id)
-
-        if title_norm:
-            return title_norm, "归一化标题"
-        elif fallback_title:
-            return fallback_title, "原始标题"
-        else:
-            # 如果都没有，尝试从数据库中查询
-            try:
-                if self.db_handler and hasattr(self.db_handler, 'get_novel_title'):
-                    title = self.db_handler.get_novel_title("qidian", novel_id)
-                    if title:
-                        return title, "数据库标题"
-            except Exception as e:
-                self.logger.debug("[标题显示] 获取数据库标题失败: %s", e)
-
-            return f"小说ID:{novel_id}", "ID"
-
     # ------------------------------------------------------------------
     # Rank type mapping (rank_family / rank_sub_cat)
     # ------------------------------------------------------------------
+    """Build mapping from config rank_type to normalized RankIdentity."""
     def _build_rank_type_map(self) -> Dict[str, RankIdentity]:
-        """Build mapping from config rank_type to normalized RankIdentity.
-
-        You can override via site_config["rank_type_map"] like:
-        {
-            "hotsales": {"rank_family": "畅销榜", "rank_sub_cat": ""},
-            "newbook_signed_author": {"rank_family": "新书榜", "rank_sub_cat": "签约作者新书榜"}
-        }
-        """
+        # 首先检查 site_config 中的自定义映射
         custom = self.site_config.get("rank_type_map")
         if isinstance(custom, dict) and custom:
             out: Dict[str, RankIdentity] = {}
@@ -436,114 +273,25 @@ class QidianSpider(BaseSpider):
                 )
             return out
 
-        return {
-            "hotsales": RankIdentity("畅销榜"),
-            "yuepiao": RankIdentity("月票榜"),
-            "recommend": RankIdentity("推荐榜"),
-            "collect": RankIdentity("收藏榜"),
-            "newbook": RankIdentity("新书榜"),
-            "newbook_signed_author": RankIdentity("新书榜", "签约作者新书榜"),
-            "newbook_public_author": RankIdentity("新书榜", "公众作者新书榜"),
-            "newbook_new_signed": RankIdentity("新书榜", "新人签约新书榜"),
-            "newbook_new_author": RankIdentity("新书榜", "新人作者新书榜"),
-        }
-
-    # ------------------------------------------------------------------
-    # Page fetching
-    # ------------------------------------------------------------------
-    # 修改 qidian_spider.py 中的 _get_soup 方法
-
-    def _get_soup(
-            self, url: str, wait_css: Optional[str] = None, wait_sec: int = 12,
-            max_retries: int = 2, retry_delay: int = 3
-    ) -> Optional[BeautifulSoup]:
-        """Fetch URL using Selenium and return BeautifulSoup with retry mechanism.
-
-        Args:
-            url: target url
-            wait_css: optional CSS selector to wait for (presence)
-            wait_sec: wait timeout seconds
-            max_retries: maximum number of retries
-            retry_delay: delay between retries in seconds
-        """
-        if not self.driver:
-            self.logger.error("Driver not initialized.")
-            return None
-
-        for attempt in range(max_retries + 1):  # 包括初始尝试
-            try:
-                self.logger.info(f"[页面获取] 尝试 {attempt + 1}/{max_retries + 1}: {url}")
-
-                # 动态调整超时时间
-                current_timeout = min(wait_sec * (attempt + 1), 60)  # 最大60秒
-
-                # 设置页面加载超时
-                self.driver.set_page_load_timeout(current_timeout)
-
-                # 访问页面
-                self.driver.get(url)
-
-                # 等待页面加载
-                self._sleep_human(0.8, 1.6)
-
-                # 等待特定元素
-                if wait_css:
-                    try:
-                        WebDriverWait(self.driver, current_timeout).until(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, wait_css))
+        # 然后尝试从 config.WEBSITES 中获取
+        try:
+            from config import WEBSITES
+            qidian_config = WEBSITES.get("qidian", {})
+            if qidian_config:
+                config_rank_type_map = qidian_config.get("rank_type_map")
+                if isinstance(config_rank_type_map, dict) and config_rank_type_map:
+                    out: Dict[str, RankIdentity] = {}
+                    for k, v in config_rank_type_map.items():
+                        out[k] = RankIdentity(
+                            rank_family=v.get("rank_family", k),
+                            rank_sub_cat=v.get("rank_sub_cat", "") or "",
                         )
-                        self.logger.info(f"[页面获取] 成功找到元素: {wait_css}")
-                    except Exception as e:
-                        self.logger.warning(f"[页面获取] 等待元素超时: {wait_css}, 错误: {e}")
-
-                # 额外检查页面是否正常加载
-                page_title = self.driver.title
-                if "404" in page_title or "无法访问" in page_title or "出错了" in page_title:
-                    raise Exception(f"页面异常: {page_title}")
-
-                # 获取页面源码
-                page_source = self.driver.page_source
-
-                # 检查页面是否包含有效内容
-                if len(page_source) < 1000:
-                    self.logger.warning(f"[页面获取] 页面内容过短: {len(page_source)} 字符")
-                    if attempt < max_retries:
-                        continue
-
-                soup = BeautifulSoup(page_source, "html.parser")
-
-                # 验证soup是否有效
-                if not soup or len(str(soup)) < 1000:
-                    self.logger.warning("[页面获取] 解析的HTML过短")
-                    if attempt < max_retries:
-                        continue
-
-                self.logger.info(f"[页面获取] 成功获取页面: {url}")
-                return soup
-
-            except Exception as e:
-                error_msg = str(e)
-                self.logger.warning(f"[页面获取] 尝试 {attempt + 1} 失败: {error_msg}")
-
-                # 如果是最后一次尝试，返回None
-                if attempt >= max_retries:
-                    self.logger.error(f"[页面获取] 所有尝试都失败: {url}")
-                    return None
-
-                # 等待后重试
-                self.logger.info(f"[页面获取] 等待 {retry_delay} 秒后重试...")
-                time.sleep(retry_delay)
-
-                # 尝试刷新或重新初始化driver
-                try:
-                    self.driver.refresh()
-                except:
-                    try:
-                        self._init_driver()
-                    except:
-                        pass
-
-        return None
+                    return out
+        except ImportError:
+            # 如果无法导入 config，则继续使用默认映射
+            pass
+        except Exception as e:
+            self.logger.warning(f"从 config 获取 rank_type_map 失败: {e}")
 
     # ------------------------------------------------------------------
     # Rank Page Parsing -> novel_id, category, tag
@@ -643,8 +391,8 @@ class QidianSpider(BaseSpider):
                 "intro": intro,
                 "main_category": main_cat,
                 "tags": tags,
-                "status": "",  # detail page fills
-                "total_words": 0,  # detail page fills
+                "status": None,         # wait for detail page fill
+                "total_words": None,    # wait for detail page fill
                 "url": url,
                 "rank": global_rank,
                 "total_recommend": total_recommend,  # 将在详情页填充
@@ -717,9 +465,9 @@ class QidianSpider(BaseSpider):
     # ------------------------------------------------------------------
     # BaseSpider API: fetch_rank_list
     # ------------------------------------------------------------------
-    def fetch_rank_list(self, rank_type: str = "hotsales") -> List[Dict[str, Any]]:
-        """Fetch a rank list (multi-page) and return standardized items.
-
+    """Fetch a rank list (multi-page) and return standardized items"""
+    def fetch_rank_list(self, rank_type: str = "hotsales", page = 5) -> List[Dict[str, Any]]:
+        """
         Args:
             rank_type: key in site_config["rank_urls"]
 
@@ -742,16 +490,13 @@ class QidianSpider(BaseSpider):
             url = url_template.format(page=page)
             self.logger.info(f"Rank[{rank_type}] page {page}/{pages}: {url}")
 
-            soup = self._get_soup(
-                url,
-                wait_css="[data-bid], .book-img-text li, .rank-view-list li",
-                wait_sec=10,
-            )
+            soup = self._get_soup(url, wait_css="...", is_scrolling=False)
+
             if not soup:
                 continue
 
             all_items.extend(self._parse_rank_page(soup, rank_type=rank_type, page=page))
-            self._sleep_human(2.5, 5.5)
+            self._humanlike_sleep(2.5, 5.5)
 
         return all_items
 
@@ -1226,7 +971,7 @@ class QidianSpider(BaseSpider):
     # ------------------------------------------------------------------
     # BaseSpider API: fetch_novel_detail
     # ------------------------------------------------------------------
-    def fetch_novel_detail(self, novel_url: str, novel_id: str = "") -> Dict[str, Any]:
+    def fetch_novel_detail(self, novel_url: str, pid: str, seed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Fetch novel detail page and extract normalized metadata.
 
         Args:
@@ -1242,13 +987,13 @@ class QidianSpider(BaseSpider):
             - total_recommend
             - first_upload_date
         """
-        display_title, title_source = self._get_display_title(novel_id, "")
+        display_title, title_source = self._get_display_title(novel_url, "")
 
         if display_title and title_source != "ID":
             self.logger.info("[详情抓取] 开始获取小说详情: 《%s》 (ID: %s)", display_title, novel_id)
         else:
             self.logger.info("[详情抓取] 开始获取小说详情: %s", novel_url)
-        pid = novel_id or self._extract_novel_id_from_url(novel_url)
+        pid = self._extract_novel_id_from_url(novel_url)
         if pid and pid in self.book_cache:
             return self.book_cache[pid]
 
@@ -1270,11 +1015,8 @@ class QidianSpider(BaseSpider):
         soup = None
         final_url = novel_url
         for u in candidate_urls:
-            s = self._get_soup(
-                u,
-                wait_css="h1, .book-info, meta[property='og:title'], meta[property='og:novel:book_name']",
-                wait_sec=14,
-            )
+            s = self._get_soup(u, wait_css="...", is_scrolling=False)
+
             if s is not None:
                 soup = s
                 final_url = u
@@ -1298,23 +1040,32 @@ class QidianSpider(BaseSpider):
                 "first_upload_date": "",
             }
 
+        seed = seed or {}
+
         detail: Dict[str, Any] = {
             "platform": "qidian",
             "platform_novel_id": pid,
             "url": final_url,
-            "title": "",
-            "author": "",
-            "intro": "",
-            "main_category": "未知",
-            "tags": [],
+
+            # rank 作为种子
+            "title": seed.get("title", "") or "",
+            "author": seed.get("author", "") or "",
+            "intro": seed.get("intro", "") or "",
+            "main_category": seed.get("main_category", "未知") or "未知",
+            "tags": seed.get("tags", []) or [],
+
+            # detail 负责字段
             "status": "",
             "total_words": 0,
             "total_recommend": 0,
             "first_upload_date": "",
         }
 
-        self._fill_detail_title_author_intro(soup, detail)
-        self._fill_detail_category_tags(soup, detail)
+        if self._need_fallback_scalar(detail.get("main_category"), when_unknown=True) or self._need_fallback_tags(
+                detail.get("tags")):
+            self._fill_detail_title_author_intro(soup, detail)
+            self._fill_detail_category_tags(soup, detail)
+
         self._fill_detail_status_words(soup, detail)
         self._fill_total_recommend(soup, detail, page_url=final_url)
         self._extract_first_upload_date(soup, detail)
@@ -1344,10 +1095,10 @@ class QidianSpider(BaseSpider):
                 catalog_volumes = catalog_all.select('div.catalog-volume')
                 self.logger.info(f'[章节获取]找到 {len(catalog_volumes)} 个分卷')
 
-                # 寻找第一个有效分卷（章节数>=20的正文卷）
+                # 寻找第一个有效分卷（章节数>=10的正文卷）
                 target_volume = None
                 for volume_index, volume in enumerate(catalog_volumes):
-                    volume_title_elem = volume.select_one('h3.volume-title')
+                    volume_title_elem = volume.select_one('h3.volume-name, h3.volume-tittle')
                     volume_title = volume_title_elem.text.strip() if volume_title_elem else f'分卷{volume_index + 1}'
 
                     # 跳过"作品相关"卷
@@ -1358,18 +1109,18 @@ class QidianSpider(BaseSpider):
                     # 查找章节列表
                     chapters_list = volume.select_one('ul.volume-chapters')
                     if not chapters_list:
-                        self.logger.warning(f'[章节获取]分卷 {volume_index + 1} ({volume_title}) 没有找到volume-chapters')
+                        self.logger.warning(f'[章节获取]分卷[{volume_index + 1}] ({volume_title}) 没有找到volume-chapters')
                         continue
 
                     # 获取所有章节项
                     chapter_items = chapters_list.select('li.chapter-item')
                     chapter_count = len(chapter_items)
-                    self.logger.info(f'[章节获取]分卷 {volume_index + 1} ({volume_title}) 有 {chapter_count} 个章节')
+                    self.logger.info(f'[章节获取] ({volume_title}) 有 {chapter_count} 个章节')
 
-                    # 判断分卷是否有效：章节数>=20
-                    if chapter_count < 20:
+                    # 判断分卷是否有效：章节数>=10
+                    if chapter_count < 10:
                         self.logger.warning(
-                            f'[章节获取]分卷 {volume_index + 1} ({volume_title}) 章节数{chapter_count} < 20，跳过此分卷')
+                            f'[章节获取]分卷 {volume_index + 1} ({volume_title}) 章节数{chapter_count} < 10，跳过此分卷')
                         continue
                     else:
                         target_volume = volume
@@ -1377,7 +1128,7 @@ class QidianSpider(BaseSpider):
                         break
 
                 if not target_volume:
-                    self.logger.warning('[章节获取]未找到有效分卷（章节数>=20）')
+                    self.logger.warning('[章节获取]未找到有效分卷（章节数>=10）')
                     return []
 
                 # 查找目标卷的章节列表
@@ -1498,10 +1249,10 @@ class QidianSpider(BaseSpider):
                                     try:
                                         word_count = int(word_match.group(1))
                                     except ValueError:
-                                        word_count = 2000  # 默认字数
+                                        word_count = 0  # 默认字数
                                 else:
                                     # 使用默认字数
-                                    word_count = 2000
+                                    word_count = 0
 
                             chapter_links.append((
                                 chapter_name,
@@ -1725,11 +1476,7 @@ class QidianSpider(BaseSpider):
             self.logger.info(f'访问目录页以获取第一章: {catalog_url}')
 
             # 访问目录页面
-            catalog_soup = self._get_soup(
-                catalog_url,
-                wait_css="div.catalog-all, div.catalog-volume, ul.volume-chapters",
-                wait_sec=15,
-            )
+            catalog_soup = self._get_soup(catalog_url, wait_css="...", is_scrolling=False)
 
             if not catalog_soup:
                 self.logger.warning("无法访问目录页")
@@ -1752,11 +1499,7 @@ class QidianSpider(BaseSpider):
                 self.logger.info(f"[章节发布时间]获取第一章以提取上架时间: {chapter_url}")
 
                 # 访问第一章页面
-                chapter_soup = self._get_soup(
-                    chapter_url,
-                    wait_css="div.reader-content .content-text, div.chapter-wrapper .content-text",
-                    wait_sec=15,
-                )
+                chapter_soup = self._get_soup(chapter_url, wait_css="...", is_scrolling=False)
 
                 if not chapter_soup:
                     self.logger.warning("无法访问第一章页面")
@@ -1840,12 +1583,7 @@ class QidianSpider(BaseSpider):
             # 访问章节页面
             self.logger.info(f'访问章节页面: {chapter_url}')
 
-            # 使用 _get_soup 方法获取页面
-            soup = self._get_soup(
-                chapter_url,
-                wait_css="div.reader-content .content-text, div.chapter-wrapper .content-text, .read-content, .chapter-entity",
-                wait_sec=15,
-            )
+            soup = self._get_soup(chapter_url, wait_css="...", is_scrolling=False)
 
             if not soup:
                 return None
@@ -1883,11 +1621,7 @@ class QidianSpider(BaseSpider):
             self.logger.info(f'访问目录页: {catalog_url}')
 
             # 访问目录页面
-            soup = self._get_soup(
-                catalog_url,
-                wait_css="div.catalog-all, div.catalog-volume, ul.volume-chapters",
-                wait_sec=15,
-            )
+            soup = self._get_soup(catalog_url, wait_css="...", is_scrolling=False)
 
             if not soup:
                 return []
@@ -1927,7 +1661,7 @@ class QidianSpider(BaseSpider):
 
                     # 章节间延迟
                     if i < len(chapter_infos):
-                        self._sleep_human(2, 4)
+                        self._humanlike_sleep(2, 4)
 
                 except Exception as e:
                     self.logger.error(f'获取章节失败 {chapter_title}: {e}')
@@ -2186,11 +1920,7 @@ class QidianSpider(BaseSpider):
         self.logger.info(f"[章节智能补全] 访问目录页: {catalog_url}")
 
         # 访问目录页面
-        soup = self._get_soup(
-            catalog_url,
-            wait_css="div.catalog-all, div.catalog-volume, ul.volume-chapters",
-            wait_sec=15,
-        )
+        soup = self._get_soup(catalog_url, wait_css="...", is_scrolling=False)
 
         if not soup:
             self.logger.warning("[章节智能补全] 无法访问目录页")
@@ -2240,7 +1970,7 @@ class QidianSpider(BaseSpider):
 
                 # 章节间延迟
                 if i < len(chapter_infos_to_fetch):
-                    self._sleep_human(2, 4)
+                    self._humanlike_sleep(2, 4)
 
             except Exception as e:
                 self.logger.error(f"[章节智能补全] 获取章节失败 {chapter_title}: {e}")
@@ -2507,54 +2237,101 @@ class QidianSpider(BaseSpider):
                              i, min(len(items), max_books), display_title, novel_id, title_source)
             enriched = dict(book)
 
+            # 记录 rank 的分类/标签（作为主来源）
+            original_main = enriched.get("main_category", "")
+            original_tags = enriched.get("tags", []) or []
+            self.logger.info(f"[排行榜页获取信息] 《{display_title}》 - 主分类='{original_main}', 标签={original_tags}")
+
             if fetch_detail:
                 self.logger.info("[数据补完] 《%s》 - 开始获取详情信息", display_title)
-                detail = self.fetch_novel_detail(enriched.get("url", ""), enriched.get("platform_novel_id", ""))
-
-                # 记录处理前的分类信息
-                original_main = enriched.get("main_category", "")
-                original_tags = enriched.get("tags", [])
-                self.logger.info(f"[数据补完] 《{title}》 - 原有分类: 主分类='{original_main}', 标签={original_tags}")
+                # 先fetch rank page的信息
+                detail = self.fetch_novel_detail(
+                    enriched.get("url", ""),
+                    enriched.get("platform_novel_id", ""),
+                    seed=enriched,
+                )
 
                 # 更新所有字段，包括总推荐数
                 update_fields = ["title", "author", "intro", "status", "total_words",
                                  "total_recommend", "first_upload_date"]
 
-                for k in update_fields:
+                # -----------------------------
+                # 1) Detail 主字段：永远更新
+                # -----------------------------
+                # total_recommend：你明确只从详情页取（榜单页没有）
+                if detail.get("total_recommend") is not None:
+                    enriched["total_recommend"] = detail.get("total_recommend")
+                    self.logger.debug(f"[数据补完] 《{display_title}》 - 更新总推荐数: {enriched['total_recommend']}")
+
+                # status / total_words / first_upload_date：由详情页负责
+                for k in ["status", "total_words", "first_upload_date"]:
                     dv = detail.get(k)
                     if dv is not None:
-                        # 对于总推荐数，总是更新（因为榜单页没有这个数据）
-                        if k == "total_recommend":
-                            enriched[k] = dv
-                            self.logger.debug(f"[数据补完] 《{title}》 - 更新总推荐数: {dv}")
-                        # 对于其他字段，只在为空时才更新
-                        elif k not in enriched or not enriched[k]:
-                            enriched[k] = dv
-                            self.logger.debug(f"[数据补完] 《{title}》 - 更新字段 {k}: {dv}")
+                        enriched[k] = dv
+                        self.logger.debug(f"[数据补完] 《{display_title}》 - 更新字段 {k}: {dv}")
 
-                # 分类处理：优先使用详情页的分类，但避免用"未知"覆盖正确的分类
-                detail_main_cat = detail.get("main_category")
-                detail_tags = detail.get("tags", [])
+                # -----------------------------
+                # 2) Rank 主字段：仅在缺失/异常时兜底补全
+                # -----------------------------
+                # title/author：为空才补
+                if self._need_fallback_scalar(enriched.get("title"),
+                                              when_empty=True) and not self._need_fallback_scalar(detail.get("title"),
+                                                                                                  when_empty=True):
+                    enriched["title"] = detail.get("title")
+                    self.logger.info(f"[数据补完] 《{display_title}》 - fallback标题: {enriched['title']}")
 
-                if detail_main_cat and detail_main_cat != "未知":
+                if self._need_fallback_scalar(enriched.get("author"),
+                                              when_empty=True) and not self._need_fallback_scalar(detail.get("author"),
+                                                                                                  when_empty=True):
+                    enriched["author"] = detail.get("author")
+                    self.logger.info(f"[数据补完] 《{display_title}》 - fallback作者: {enriched['author']}")
+
+                # intro：为空 or 太短才补（按你之前建议的 min_len=15）
+                if self._need_fallback_scalar(enriched.get("intro"), when_empty=True,
+                                              min_len=15) and not self._need_fallback_scalar(detail.get("intro"),
+                                                                                             when_empty=True,
+                                                                                             min_len=15):
+                    enriched["intro"] = detail.get("intro")
                     self.logger.info(
-                        f"[数据补完] 《{title}》 - 使用详情页主分类: '{detail_main_cat}' (替换原有: '{original_main}')")
-                    enriched["main_category"] = detail_main_cat
+                        f"[数据补完] 《{display_title}》 - fallback简介(长度不足): {enriched['intro'][:40]}...")
+
+                # -----------------------------
+                # 3) 分类/标签：Rank 为主，仅在 Rank 缺失时用 Detail 兜底（不 merge）
+                # -----------------------------
+                rank_need_cat = self._need_fallback_scalar(enriched.get("main_category"), when_unknown=True)
+                rank_need_tags = self._need_fallback_tags(enriched.get("tags"))
+
+                if rank_need_cat:
+                    detail_cat = detail.get("main_category")
+                    if detail_cat and not self._need_fallback_scalar(detail_cat, when_unknown=True):
+                        self.logger.info(
+                            f"[数据补完] 《{display_title}》 - fallback主分类: '{original_main}' -> '{detail_cat}'"
+                        )
+                        enriched["main_category"] = detail_cat
+                    else:
+                        self.logger.info(f"[数据补完] 《{display_title}》 - 主分类兜底失败，保持Rank值: '{original_main}'")
                 else:
-                    self.logger.info(f"[数据补完] 《{title}》 - 保留原有主分类: '{original_main}'")
+                    self.logger.info(f"[数据补完] 《{display_title}》 - 主分类保持Rank: '{original_main}'")
 
-                # 合并标签
-                existing_tags = set(enriched.get("tags", []))
-                new_tags = set(detail.get("tags", []))
-                merged_tags = list(existing_tags.union(new_tags))
+                if rank_need_tags:
+                    detail_tags = detail.get("tags", []) or []
+                    if not self._need_fallback_tags(detail_tags):
+                        self.logger.info(
+                            f"[数据补完] 《{display_title}》 - fallback标签: {original_tags} -> {detail_tags}"
+                        )
+                        enriched["tags"] = detail_tags
+                    else:
+                        self.logger.info(f"[数据补完] 《{display_title}》 - 标签兜底失败，保持Rank标签: {original_tags}")
+                else:
+                    # 不 merge：保持 rank 标签
+                    enriched["tags"] = original_tags
 
-                if merged_tags != original_tags:
-                    self.logger.info(
-                        f"[数据补完] 《{title}》 - 合并标签: {original_tags} + {list(new_tags)} = {merged_tags}")
-                enriched["tags"] = merged_tags
+                # 最终去重（保持顺序）
+                enriched["tags"] = self._dedupe_keep_order([t for t in (enriched.get("tags") or []) if t])
 
                 self.logger.info(
-                    f"[数据补完] 《{title}》 - 详情处理完成: 主分类='{enriched.get('main_category')}', 标签={enriched.get('tags', [])}")
+                    f"[数据补完] 《{display_title}》 - 详情处理完成: 主分类='{enriched.get('main_category')}', 标签={enriched.get('tags', [])}"
+                )
 
             if fetch_chapters:
                 self.logger.info(f"[数据补完] 《{title}》 - 开始获取章节内容 (目标{chapter_count}章)")
@@ -2586,7 +2363,7 @@ class QidianSpider(BaseSpider):
             if i < min(len(items), max_books):
                 delay = random.uniform(2, 4)
                 self.logger.debug(f"[数据补完] 等待 {delay:.1f} 秒后处理下一本书...")
-                self._sleep_human(2, 4)
+                self._humanlike_sleep(2, 4)
 
         self.logger.info(f"[数据补完] 全部完成！共处理 {processed_count} 本书籍")
         return out

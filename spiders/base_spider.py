@@ -1,6 +1,7 @@
 # spiders/base_spider.py
 from __future__ import annotations
 
+import copy
 import os
 import time
 import json
@@ -17,6 +18,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+from bs4 import BeautifulSoup
+import config
 
 
 class BaseSpider(ABC):
@@ -33,11 +36,15 @@ class BaseSpider(ABC):
             site_config: 站点配置字典，包含base_url、rank_urls等
             db_handler: 数据库处理器实例，用于直接存储数据
         """
+        self.config = config
         self.site_config = site_config
         self.name = site_config.get('name', 'unknown')
         self.base_url = site_config.get('base_url', '')
-        self.request_delay = site_config.get('request_delay', 2.0)
-        self.max_retries = site_config.get('max_retries', 3)
+
+        # spider共用config参数
+        crawler = getattr(self.config, "CRAWLER_CONFIG", {}) or {}
+        self.request_delay = float(site_config.get("request_delay", crawler.get("retry_delay", 2.0)))
+        self.max_retries = int(site_config.get("max_retries", crawler.get("max_retries", 3)))
 
         # 数据库处理器
         self.db_handler = db_handler
@@ -59,8 +66,8 @@ class BaseSpider(ABC):
         if self.selenium_config.get('enabled', True):
             self._init_driver()
 
+    """设置日志记录器"""
     def _setup_logger(self) -> logging.Logger:
-        """设置日志记录器"""
         logger = logging.getLogger(f'{self.name}_spider')
         logger.setLevel(logging.INFO)
 
@@ -69,7 +76,7 @@ class BaseSpider(ABC):
             return logger
 
         # 确保日志目录存在
-        log_dir = 'outputs/logs'
+        log_dir = (getattr(self.config, "OUTPUT_PATHS", {}) or {}).get("logs", "outputs/logs")
         os.makedirs(log_dir, exist_ok=True)
 
         # 文件处理器
@@ -96,261 +103,370 @@ class BaseSpider(ABC):
 
         return logger
 
+    # ------------------------------------------------------------------
+    # Selenium and webdriver 初始化
+    # ------------------------------------------------------------------
     def _build_selenium_config(self) -> Dict[str, Any]:
-        """构建Selenium配置
-
-        合并默认配置和站点特定配置
         """
-        # 默认配置
-        config = {
-            "enabled": True,
-            "browser": "chrome",
-            "options": {
-                "headless": True,
-                "no_sandbox": True,
-                "disable_dev_shm_usage": True,
-                "disable_gpu": True,
-                "window_size": "1920,1080",
-                "disable_blink_features": "AutomationControlled",
-                "user_agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-            },
-            "experimental_options": {
-                "excludeSwitches": ["enable-automation"],
-                "useAutomationExtension": False,
-            },
-            "timeout": 15,
-            "implicit_wait": 10,
-            "page_load_timeout": 30,
-            "stealth_mode": True,
-            "driver_path": None,
-        }
-
-        # 更新站点特定配置
-        site_specific = self.site_config.get("selenium_specific", {}) or {}
-        for k, v in site_specific.items():
-            if k in config and isinstance(config[k], dict) and isinstance(v, dict):
-                config[k].update(v)
-            else:
-                config[k] = v
-
-        return config
+        Merge: config.SELENIUM_CONFIG (global default)
+             + self.site_config['selenium_specific'] (site override)
+        """
+        base = getattr(config, "SELENIUM_CONFIG", {}) or {}
+        site_specific = (self.site_config or {}).get("selenium_specific", {}) or {}
+        return self._deep_merge_dict(base, site_specific)
 
     def _init_driver(self) -> bool:
-        """初始化Chrome WebDriver
-
-        Returns:
-            bool: 是否初始化成功
-        """
         try:
-            options = Options()
-            cfg_options = self.selenium_config.get("options", {})
+            cfg = self.selenium_config or {}
+            if not cfg.get("enabled", True):
+                self.logger.info("Selenium disabled by config.")
+                return False
 
-            # 设置Chrome选项
-            if cfg_options.get("headless", True):
+            browser = (cfg.get("browser") or "chrome").lower()
+            if browser != "chrome":
+                raise ValueError(f"Unsupported browser: {browser}")
+
+            options = Options()
+
+            # ----- chrome arguments from cfg["options"] -----
+            opt_cfg = cfg.get("options", {}) or {}
+
+            headless = bool(opt_cfg.get("headless", True))
+            if headless:
                 options.add_argument("--headless=new")
 
-            if "window_size" in cfg_options:
-                options.add_argument(f"--window-size={cfg_options['window_size']}")
+            if opt_cfg.get("window_size"):
+                options.add_argument(f"--window-size={opt_cfg['window_size']}")
 
-            if cfg_options.get("user_agent"):
-                options.add_argument(f"user-agent={cfg_options['user_agent']}")
+            if opt_cfg.get("user_agent"):
+                options.add_argument(f"user-agent={opt_cfg['user_agent']}")
 
-            # 添加其他选项
-            for k, v in cfg_options.items():
+            # add all remaining items as flags
+            for k, v in opt_cfg.items():
                 if k in {"headless", "window_size", "user_agent"}:
                     continue
-                if isinstance(v, bool) and v:
-                    options.add_argument(f"--{k.replace('_', '-')}")
+                flag = f"--{k.replace('_', '-')}"
+                if isinstance(v, bool):
+                    if v:
+                        options.add_argument(flag)
                 elif isinstance(v, str):
-                    options.add_argument(f"--{k.replace('_', '-')}={v}")
+                    # allow either "--k=v" style or special cases
+                    options.add_argument(f"{flag}={v}")
+                elif v is not None:
+                    options.add_argument(f"{flag}={v}")
 
-            # 实验性选项
-            for k, v in (self.selenium_config.get("experimental_options", {}) or {}).items():
+            # ----- experimental options -----
+            for k, v in (cfg.get("experimental_options", {}) or {}).items():
                 options.add_experimental_option(k, v)
 
-            # 性能优化：禁用图片和CSS
-            prefs = {
-                "profile.default_content_setting_values": {
-                    "images": 2,
-                    "stylesheet": 2,
-                    "javascript": 1,
-                }
-            }
-            options.add_experimental_option("prefs", prefs)
+            # ----- prefs (perf etc.) -----
+            prefs = cfg.get("prefs")
+            if isinstance(prefs, dict) and prefs:
+                options.add_experimental_option("prefs", prefs)
 
-            # 反检测
-            if self.selenium_config.get("stealth_mode", True):
-                options.add_argument("--disable-blink-features=AutomationControlled")
-                options.add_experimental_option("excludeSwitches", ["enable-automation"])
-                options.add_experimental_option("useAutomationExtension", False)
+            # ----- stealth -----
+            stealth = cfg.get("stealth", {}) or {}
+            if stealth.get("enabled", True):
+                if stealth.get("disable_blink_features"):
+                    options.add_argument(
+                        f"--disable-blink-features={stealth['disable_blink_features']}"
+                    )
+                # allow overriding these in stealth block
+                if stealth.get("excludeSwitches"):
+                    options.add_experimental_option("excludeSwitches", stealth["excludeSwitches"])
+                if "useAutomationExtension" in stealth:
+                    options.add_experimental_option("useAutomationExtension", stealth["useAutomationExtension"])
 
-            # 驱动路径
-            driver_path = self.selenium_config.get("driver_path")
+            # ----- driver service -----
+            driver_path = cfg.get("driver_path")
+            auto_install = bool(cfg.get("auto_install_driver", True))
+
             if driver_path and os.path.exists(driver_path):
                 service = Service(driver_path)
             else:
+                if not auto_install:
+                    raise FileNotFoundError(
+                        "driver_path not found and auto_install_driver is False"
+                    )
+                if ChromeDriverManager is None:
+                    raise RuntimeError(
+                        "webdriver_manager not installed, cannot auto install chromedriver"
+                    )
                 service = Service(ChromeDriverManager().install())
 
-            # 创建驱动
             self.driver = webdriver.Chrome(service=service, options=options)
 
-            # 设置超时
-            self.driver.set_page_load_timeout(
-                int(self.selenium_config.get("page_load_timeout", 30))
-            )
-            self.driver.implicitly_wait(
-                int(self.selenium_config.get("implicit_wait", 10))
-            )
+            self.driver.set_page_load_timeout(int(cfg.get("page_load_timeout", 30)))
+            self.driver.implicitly_wait(int(cfg.get("implicit_wait", 10)))
 
-            # 执行反检测脚本
-            if self.selenium_config.get("stealth_mode", True):
-                self.driver.execute_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-                )
+            # webdriver undefined script
+            script = stealth.get("webdriver_undefined_script")
+            if stealth.get("enabled", True) and script:
+                self.driver.execute_script(script)
 
-            self.logger.info(f"{self.name} Selenium driver initialized successfully")
+            self.logger.info(f"{self.__class__.__name__} Selenium driver initialized.")
             return True
 
         except Exception as e:
-            self.logger.error(f"Selenium driver initialization failed: {e}")
-            if self.retry_count < self.max_retries:
-                self.retry_count += 1
-                time.sleep(2)
+            self.logger.error(f"Selenium init failed: {e}")
+
+            retry_cfg = (self.selenium_config or {}).get("retry", {}) or {}
+            if not retry_cfg.get("enabled", True):
+                return False
+
+            max_retries = int(retry_cfg.get("max_retries", 3))
+            backoff = float(retry_cfg.get("backoff_seconds", 2))
+
+            if getattr(self, "retry_count", 0) < max_retries:
+                self.retry_count = getattr(self, "retry_count", 0) + 1
+                time.sleep(backoff)
                 return self._init_driver()
             return False
 
-    def _sleep_human(self, min_time: float = 1.0, max_time: float = 3.0) -> None:
-        """模拟人类操作的随机延迟"""
-        time.sleep(random.uniform(min_time, max_time))
+    # ------------------------------------------------------------------
+    # Fetch Webpage vis BeautifulSoup
+    # ------------------------------------------------------------------
+    def _get_soup(
+            self,
+            url: str,
+            wait_css: Optional[str] = None,
+            wait_sec: Optional[int] = None,
+            max_retries: Optional[int] = None,
+            retry_delay: Optional[int] = None,
+            is_scrolling: bool = False,
+            # scrolling params (only used when is_scrolling=True)
+            target_count: Optional[int] = None,
+            max_scroll_attempts: Optional[int] = None,
+            item_css: Optional[str] = None,
+            scroll_pause_sec: Optional[float] = None,
+            no_change_limit: int = 3,
+    ) -> Optional[Any]:
+        """
+        Unified selenium fetch -> optional wait_css -> optional scroll -> optional html postprocess -> soup.
 
-    def _get_soup(self, url: str, wait_css: Optional[str] = None,
-                  wait_sec: int = 10) -> Optional[Any]:
-        """使用Selenium获取页面并返回BeautifulSoup对象
+        - qidian: is_scrolling=False (default)
+        - fanqie: is_scrolling=True, subclass overrides _scroll_load() and _postprocess_html()
 
-        Args:
-            url: 目标URL
-            wait_css: 等待的CSS选择器
-            wait_sec: 等待超时时间
-
-        Returns:
-            Optional[Any]: BeautifulSoup对象，失败返回None
+        Config defaults read from:
+          CRAWLER_CONFIG.page_fetch + site_config.page_fetch_overrides
         """
         if not self.driver:
             self.logger.error("Selenium driver not initialized")
             return None
 
-        try:
-            self.logger.debug(f"Fetching URL: {url}")
-            self.driver.get(url)
-            self._sleep_human(1, 2)
+        # ---- config defaults (global + site override) ----
+        crawler_cfg = getattr(self.config, "CRAWLER_CONFIG", {}) or {}
+        global_fetch = (crawler_cfg.get("page_fetch", {}) or {})
+        site_fetch = (self.site_config or {}).get("page_fetch_overrides", {}) or {}
+        cfg = {**global_fetch, **site_fetch}
 
-            # 等待特定元素加载
-            if wait_css:
+        _wait_sec = int(wait_sec if wait_sec is not None else cfg.get("default_wait_sec", 10))
+        _max_retries = int(max_retries if max_retries is not None else cfg.get("max_page_retries", 2))
+        _retry_delay = float(retry_delay if retry_delay is not None else cfg.get("page_retry_delay", 3))
+
+        post_load_delay = cfg.get("post_load_delay_range", (1, 2))
+        if not isinstance(post_load_delay, (list, tuple)) or len(post_load_delay) != 2:
+            post_load_delay = (1, 2)
+
+        min_html_length = int(cfg.get("min_html_length", 800))
+        bad_title_keywords = cfg.get("bad_title_keywords", ["404", "无法访问", "出错了"])
+
+        total_attempts = _max_retries + 1
+
+        for attempt in range(1, total_attempts + 1):
+            try:
+                self.logger.info(f"[页面获取] 尝试 {attempt}/{total_attempts}: {url}")
+
+                # page load
                 try:
-                    WebDriverWait(self.driver, wait_sec).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, wait_css))
+                    self.driver.set_page_load_timeout(_wait_sec)
+                except Exception:
+                    pass
+
+                self.driver.get(url)
+                self._humanlike_sleep(post_load_delay[0], post_load_delay[1])
+
+                # optional wait css
+                if wait_css:
+                    try:
+                        WebDriverWait(self.driver, _wait_sec).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, wait_css))
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Wait CSS timeout: {wait_css}, error={e}")
+
+                # optional scroll (fanqie)
+                if is_scrolling:
+                    self._scroll_load(
+                        target_count=target_count,
+                        max_scroll_attempts=max_scroll_attempts,
+                        item_css=item_css,
+                        scroll_pause_sec=scroll_pause_sec,
+                        no_change_limit=no_change_limit,
                     )
-                except Exception as e:
-                    self.logger.debug(f"Wait for element timeout: {wait_css}, error: {e}")
 
-            # 导入BeautifulSoup
-            from bs4 import BeautifulSoup
-            return BeautifulSoup(self.driver.page_source, 'html.parser')
+                html = self.driver.page_source or ""
+                html = self._postprocess_html(html)
 
-        except Exception as e:
-            self.logger.error(f"Failed to fetch page {url}: {e}")
-            return None
+                if len(html) < min_html_length:
+                    raise ValueError(f"Page source too short: {len(html)}")
 
+                soup = BeautifulSoup(html, "html.parser")
+
+                title = ""
+                try:
+                    title = (soup.title.string if soup.title else "") or ""
+                except Exception:
+                    title = ""
+
+                if any(k in title for k in bad_title_keywords):
+                    raise ValueError(f"Bad page title: {title}")
+
+                return soup
+
+            except Exception as e:
+                self.logger.warning(f"[页面获取] 失败 {attempt}/{total_attempts}: {url} ; error={e}")
+
+                if attempt >= total_attempts:
+                    self.logger.error(f"[页面获取] 所有尝试都失败: {url}")
+                    return None
+
+                time.sleep(_retry_delay)
+
+                # 简单恢复：refresh（不强制 reinit，保持简单）
+                try:
+                    self.driver.refresh()
+                except Exception:
+                    pass
+
+        return None
+
+    """_get_soup Hook: scrolling logic for infinite-scroll pages"""
+    def _scroll_load(
+            self,
+            target_count: Optional[int] = None,
+            max_scroll_attempts: Optional[int] = None,
+            item_css: Optional[str] = None,
+            scroll_pause_sec: Optional[float] = None,
+            no_change_limit: int = 3,
+    ) -> None:
+        return
+
+    """_get_soup Hook: site-specific html processing (e.g., decrypt)"""
+    def _postprocess_html(self, html: str) -> str:
+        return html
+
+    # ------------------------------------------------------------------
+    # Fetch Fallback Logic (当rank page获取信息失败时，在detail page补全信息）
+    # ------------------------------------------------------------------
+    def _need_fallback_scalar(
+            self,
+            cur: object,
+            *,
+            when_empty: bool = False,
+            when_unknown: bool = False,
+            min_len: int = 0,
+            unknown_set: set[str] | None = None,
+    ) -> bool:
+        unknown_set = unknown_set or {"", "未知"}
+
+        if when_empty:
+            if cur is None:
+                return True
+            if isinstance(cur, str) and cur.strip() == "":
+                return True
+
+        if when_unknown:
+            if cur is None:
+                return True
+            if isinstance(cur, str) and cur.strip() in unknown_set:
+                return True
+
+        if min_len and isinstance(cur, str):
+            if len(cur.strip()) < min_len:
+                return True
+
+        return False
+
+    def _need_fallback_tags(
+            self,
+            tags: object,
+            *,
+            unknown_set: set[str] | None = None,
+    ) -> bool:
+        unknown_set = unknown_set or {"", "未知"}
+
+        if tags is None:
+            return True
+        if not isinstance(tags, list):
+            return True
+
+        valid = [
+            t for t in tags
+            if isinstance(t, str) and t.strip() and t.strip() not in unknown_set
+        ]
+        return len(valid) == 0
+
+    # ------------------------------------------------------------------
+    # Spider Functions
+    # ------------------------------------------------------------------
+    """获取榜单数据"""
     @abstractmethod
     def fetch_rank_list(self, rank_type: str = '', pages: int = 5) -> List[Dict[str, Any]]:
-        """获取榜单数据
-
+        """
         Args:
             rank_type: 榜单类型
             pages: 爬取页数
-
         Returns:
             List[Dict[str, Any]]: 榜单数据列表
         """
         pass
 
+    """获取小说详情"""
     @abstractmethod
-    def fetch_novel_detail(self, novel_url: str, novel_id: str = '') -> Dict[str, Any]:
-        """获取小说详情
-
+    def fetch_novel_detail(self, novel_url: str, pid: str, seed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
         Args:
             novel_url: 小说URL
             novel_id: 小说ID
-
         Returns:
             Dict[str, Any]: 小说详情数据
         """
         pass
 
+    """使用详情数据补完小说信息"""
     @abstractmethod
     def enrich_books_with_details(self, books: List[Dict[str, Any]],
                                   max_books: int = 20) -> List[Dict[str, Any]]:
-        """使用详情数据丰富书籍信息
-
+        """
         Args:
             books: 书籍列表
             max_books: 最大处理书籍数
-
         Returns:
-            List[Dict[str, Any]]: 丰富后的书籍列表
+            List[Dict[str, Any]]: 补完后的书籍列表
         """
         pass
 
-    @abstractmethod
-    def fetch_whole_rank(self) -> List[Dict[str, Any]]:
-        """获取所有配置的榜单数据
-
-        Returns:
-            List[Dict[str, Any]]: 所有榜单数据
-        """
-        pass
-
+    """获取小说前N章内容"""
     @abstractmethod
     def fetch_first_n_chapters(self, novel_url: str, n: int = 5) -> List[Dict[str, Any]]:
-        """获取小说前N章内容
-
+        """
         Args:
             novel_url: 小说URL
             n: 章节数量
-
         Returns:
             List[Dict[str, Any]]: 章节数据列表
         """
         pass
 
-    def normalize_novel_data(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """标准化小说数据格式
-
-        Args:
-            raw_data: 原始小说数据
-
-        Returns:
-            Dict[str, Any]: 标准化后的数据
+    """获取整个榜单数据"""
+    @abstractmethod
+    def fetch_whole_rank(self) -> List[Dict[str, Any]]:
         """
-        return {
-            "platform": self.name,
-            "platform_novel_id": raw_data.get("novel_id", ""),
-            "title": raw_data.get("title", ""),
-            "author": raw_data.get("author", ""),
-            "intro": raw_data.get("intro", ""),
-            "main_category": raw_data.get("main_category", ""),
-            "sub_category": raw_data.get("sub_category", ""),
-            "tags": raw_data.get("tags", []),
-            "status": raw_data.get("status", "ongoing"),
-            "total_words": raw_data.get("total_words", 0),
-            "url": raw_data.get("url", ""),
-            "rank": raw_data.get("rank", -1),
-            "extra": raw_data.get("extra", {}),
-        }
+        Returns:
+            List[Dict[str, Any]]: 所有榜单数据
+        """
+        pass
 
     def run_daily_task(self, rank_types: Optional[List[str]] = None) -> Dict[str, Any]:
         """执行每日爬取任务
@@ -414,7 +530,7 @@ class BaseSpider(ABC):
                 results["total_novels"] += len(enriched_items)
 
                 # 随机延迟，避免请求过快
-                self._sleep_human(3, 5)
+                self._humanlike_sleep(3, 5)
 
             except Exception as e:
                 self.logger.error(f"Failed to fetch rank {rank_type}: {e}")
@@ -441,6 +557,19 @@ class BaseSpider(ABC):
         """获取今日日期字符串 (YYYY-MM-DD)"""
         return date.today().strftime("%Y-%m-%d")
 
+    @staticmethod
+    def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Deep merge override into base and return a NEW dict (base not mutated).
+        """
+        out = copy.deepcopy(base) if base else {}
+        for k, v in (override or {}).items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = BaseSpider._deep_merge_dict(out[k], v)
+            else:
+                out[k] = v
+        return out
+
     def _to_abs_url(self, href: str) -> str:
         """将相对URL转换为绝对URL"""
         if not href:
@@ -451,30 +580,36 @@ class BaseSpider(ABC):
             return href
         return urljoin(self.base_url, href)
 
-    def _save_raw_data(self, data: Any, filename: str) -> None:
-        """保存原始数据到文件
-
-        Args:
-            data: 要保存的数据
-            filename: 文件名
-        """
-        raw_data_dir = 'outputs/data/raw'
-        os.makedirs(raw_data_dir, exist_ok=True)
-
-        filepath = os.path.join(raw_data_dir, filename)
-        with open(filepath, 'w', encoding='utf-8') as f:
-            if isinstance(data, (dict, list)):
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            else:
-                f.write(str(data))
-
-        self.logger.debug(f"Raw data saved: {filepath}")
-
     def _normalize_text(self, text: str) -> str:
         """标准化文本：去除多余空白字符"""
         if not text:
             return ""
         return ' '.join(text.split())
+
+    def normalize_novel_data(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """标准化小说数据格式
+
+        Args:
+            raw_data: 原始小说数据
+
+        Returns:
+            Dict[str, Any]: 标准化后的数据
+        """
+        return {
+            "platform": self.name,
+            "platform_novel_id": raw_data.get("novel_id", ""),
+            "title": raw_data.get("title", ""),
+            "author": raw_data.get("author", ""),
+            "intro": raw_data.get("intro", ""),
+            "main_category": raw_data.get("main_category", ""),
+            "sub_category": raw_data.get("sub_category", ""),
+            "tags": raw_data.get("tags", []),
+            "status": raw_data.get("status", "ongoing"),
+            "total_words": raw_data.get("total_words", 0),
+            "url": raw_data.get("url", ""),
+            "rank": raw_data.get("rank", -1),
+            "extra": raw_data.get("extra", {}),
+        }
 
     def _parse_cn_number(self, text: str) -> Optional[int]:
         """解析中文数字表示（如'12.3万'、'1.2亿'）为整数
@@ -517,6 +652,121 @@ class BaseSpider(ABC):
                 seen.add(x)
                 out.append(x)
         return out
+
+    """模拟人类操作的随机延迟"""
+    def _humanlike_sleep(self, min_time: Optional[float] = None, max_time: Optional[float] = None) -> None:
+        """
+        Human-like delay. If min_time/max_time not provided, use config defaults.
+        Priority: explicit args > site_config.request_delay > CRAWLER_CONFIG.retry_delay
+        """
+        if min_time is None or max_time is None:
+            # 站点如果是单值 request_delay，就扩展为一个小区间
+            site_delay = (self.site_config or {}).get("request_delay", None)
+
+            if isinstance(site_delay, (list, tuple)) and len(site_delay) == 2:
+                min_time, max_time = float(site_delay[0]), float(site_delay[1])
+            else:
+                base = float(site_delay) if site_delay is not None else float(
+                    (getattr(self.config, "CRAWLER_CONFIG", {}) or {}).get("retry_delay", 2.0)
+                )
+                # 默认给一个窄随机范围，避免完全固定
+                min_time, max_time = max(0.0, base * 0.7), base * 1.3
+
+        time.sleep(random.uniform(float(min_time), float(max_time)))
+
+    """决定是否值得进详情页（避免重复提取）"""
+    def _needs_detail(self, item: Dict[str, Any]) -> bool:
+        # detail-only 字段缺失时才进
+        if not item.get("status"):
+            return True
+        if not item.get("total_words"):
+            return True
+        if item.get("total_recommend") is None:
+            return True
+
+        # 分类策略：rank 提取到主分类就不进详情页补分类
+        main_cat = (item.get("main_category") or "").strip()
+        if not main_cat or main_cat == "未知":
+            return True
+
+        return False
+
+    # ------------------------------------------------------------------
+    # Database Operations
+    # ------------------------------------------------------------------
+    """从数据库novel_titles表中获取normalized标题(title_norm)"""
+    def _get_novel_title_norm_from_db(self, novel_id: str) -> Optional[str]:
+        """从数据库novel_titles表中获取归一化的标题(title_norm)"""
+        if not self.db_handler:
+            return None
+
+        try:
+            # 使用db_handler的get_novel_title_norm方法
+            if hasattr(self.db_handler, 'get_novel_title_norm'):
+                title_norm = self.db_handler.get_novel_title_norm("qidian", novel_id)
+                if title_norm:
+                    self.logger.debug("[标题查询] 从数据库获取到归一化标题: %s (小说ID: %s)", title_norm, novel_id)
+                else:
+                    self.logger.debug("[标题查询] 数据库中未找到归一化标题 (小说ID: %s)", novel_id)
+                return title_norm
+            else:
+                self.logger.warning("[标题查询] db_handler没有get_novel_title_norm方法")
+                return None
+
+        except Exception as e:
+            self.logger.debug("[标题查询] 获取归一化标题失败 (小说ID: %s): %s", novel_id, e)
+
+        return None
+
+    """获取用于显示的标题，优先使用normalized标题"""
+    def _get_display_title(self, novel_id: str, fallback_title: str = "") -> Tuple[str, str]:
+        """
+
+        Args:
+            novel_id: 小说平台ID
+            fallback_title: 后备标题（当无法从数据库获取时使用）
+
+        Returns:
+            Tuple[显示标题, 标题来源]
+        """
+        # 首先尝试从数据库获取归一化标题
+        title_norm = self._get_novel_title_norm_from_db(novel_id)
+
+        if title_norm:
+            return title_norm, "归一化标题"
+        elif fallback_title:
+            return fallback_title, "原始标题"
+        else:
+            # 如果都没有，尝试从数据库中查询
+            try:
+                if self.db_handler and hasattr(self.db_handler, 'get_novel_title'):
+                    title = self.db_handler.get_novel_title("qidian", novel_id)
+                    if title:
+                        return title, "数据库标题"
+            except Exception as e:
+                self.logger.debug("[标题显示] 获取数据库标题失败: %s", e)
+
+            return f"小说ID:{novel_id}", "ID"
+
+    def _save_raw_data(self, data: Any, filename: str) -> None:
+        """保存原始数据到文件
+
+        Args:
+            data: 要保存的数据
+            filename: 文件名
+        """
+        raw_data_dir = 'outputs/data/raw'
+        os.makedirs(raw_data_dir, exist_ok=True)
+
+        filepath = os.path.join(raw_data_dir, filename)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            if isinstance(data, (dict, list)):
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            else:
+                f.write(str(data))
+
+        self.logger.debug(f"Raw data saved: {filepath}")
+
 
 class MockResponse:
     """模拟requests.Response对象，用于测试"""
