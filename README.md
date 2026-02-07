@@ -166,8 +166,8 @@ python tests/qidian_test.py --test rank_list --pages 1 --top_n 3
 python tests/qidian_test.py --test full_pipeline --pages 1 --top_n 2 --fetch_chapters --chapter_n 2
 ```
 #### 3.2.5 测试智能补全
-```bash python
-tests/qidian_test.py --test enrich --pages 1 --top_n 3 --fetch_chapters --chapter_n 5
+```bash 
+python tests/qidian_test.py --test enrich --pages 1 --top_n 3 --fetch_chapters --chapter_n 5
 ```
 #### 3.2.6 测试多个榜单
 ```bash

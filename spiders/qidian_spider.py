@@ -65,15 +65,6 @@ class QidianSpider(BaseSpider):
 
         super().__init__(merged_cfg, db_handler=db_handler)
         self.config = merged_cfg
-        self.driver: Optional[webdriver.Chrome] = None
-        self.db_handler = db_handler
-
-        self.book_cache: Dict[str, Dict[str, Any]] = {}
-        self.retry_count = 0
-        self.max_retries = int(site_config.get("max_retries", 3))
-
-        self.selenium_config = self._build_selenium_config()
-        self._init_driver()
 
         self.default_chapter_count = int(site_config.get("chapter_extraction_goal", 5))
         self.rank_type_map: Dict[str, RankIdentity] = self._build_rank_type_map()
@@ -310,6 +301,21 @@ class QidianSpider(BaseSpider):
 
             return f"小说ID:{novel_id}", "ID"
 
+    """从起点的小说url中获取起点的uid"""
+    def _extract_novel_id_from_url(self, url: str) -> str:
+        patterns = [
+            r"/book/(\d+)/",
+            r"www\.qidian\.com/book/(\d+)",
+        ]
+        for p in patterns:
+            m = re.search(p, url or "")
+            if m:
+                return m.group(1)
+        for part in (url or "").split("/"):
+            if part.isdigit() and len(part) >= 6:
+                return part
+        return ""
+
     # ------------------------------------------------------------------
     # Rank type mapping (rank_family / rank_sub_cat)
     # ------------------------------------------------------------------
@@ -349,21 +355,6 @@ class QidianSpider(BaseSpider):
     # ------------------------------------------------------------------
     # Rank Page Parsing -> novel_id, category, tag
     # ------------------------------------------------------------------
-    """从起点的小说url中获取起点的uid"""
-    def _extract_novel_id_from_url(self, url: str) -> str:
-        patterns = [
-            r"/book/(\d+)/",
-            r"www\.qidian\.com/book/(\d+)",
-        ]
-        for p in patterns:
-            m = re.search(p, url or "")
-            if m:
-                return m.group(1)
-        for part in (url or "").split("/"):
-            if part.isdigit() and len(part) >= 6:
-                return part
-        return ""
-
     """Parse Rank Page soup into raw rank items"""
     def _parse_rank_page(self, soup: BeautifulSoup, *, rank_type: str, page: int) -> List[Dict[str, Any]]:
         selectors = [
@@ -590,7 +581,7 @@ class QidianSpider(BaseSpider):
                 else:
                     detail["intro"] = self._normalize_text(intro_elem.get_text(strip=True))
 
-    """从详情页soup提取完整的分类信息（主分类·子分类）"""
+    """从Detail Page soup中提取完整的分类信息（主分类·副分类）"""
     def _extract_category_from_detail(self, soup: BeautifulSoup) -> str:
         try:
             self.logger.info("[详情页]开始提取分类信息...")
@@ -725,7 +716,7 @@ class QidianSpider(BaseSpider):
             self.logger.error(traceback.format_exc())
             return "未知"
 
-    """详情页soup提取主分类并填充并填充输入db的dict"""
+    """Detail Pagesoup提取主分类和副分类并填充并填充输入db的dict"""
     def _fill_detail_category_tags(self, soup: BeautifulSoup, detail: Dict[str, Any]) -> None:
         # 如果已经有主分类且不是"未知"，则跳过详情页分类提取
         current_main = detail.get("main_category", "")
