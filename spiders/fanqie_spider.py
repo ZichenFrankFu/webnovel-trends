@@ -1,96 +1,90 @@
 # spiders/fanqie_spider.py
+"""FanqieSpider (番茄小说爬虫)
+
+Phase 1 目标：
+- 使用 Selenium 抓取起点各类榜单
+- 抽取小说元信息（书名、作者、简介、主分类、细分题材 tag、状态、总字数）
+- 抓取前 N 章正文用于后续开篇分析（FIRST_N_CHAPTERS）
+
+数据库相关
+- NOVELS.main_category：只存主分类（如"西方奇幻""科幻末世"）
+- 起点"副分类"当作一个 tag 进入 TAGS / NOVEL_TAG_MAP （如"奇幻""穿越"）
+- RANK_LISTS：rank_family 存大榜（阅读榜/新书榜）
+  rank_sub_cat 番茄小说无副分类
+- RANK_ENTRIES：番茄使用 reading_count（在读）作为热度参考
+"""
 from __future__ import annotations
 
-import os
 import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
 
 import config
 from .base_spider import BaseSpider
 from .fanqie_font_decoder import FANQIE_CHAR_MAP
 
-GLOBAL_SELENIUM_CONFIG = getattr(config, "SELENIUM_CONFIG", {}) or {}
-
-
+"""Normalized rank identity that maps to RANK_LISTS schema."""
 @dataclass(frozen=True)
 class RankIdentity:
-    """Normalized rank identity that maps to RANK_LISTS schema."""
     rank_family: str
-    rank_sub_cat: str = ""      # 番茄小说没有子分类
+    rank_sub_cat: str = ""
 
 """番茄小说 Selenium 爬虫"""
 class FanqieSpider(BaseSpider):
     """
     功能：
-    1) 抓取榜单页（按照番茄的格式每个榜单仅1页，获取榜上书籍信息：排名/书名/分类/作者等信息）
-    2) 抓取详情页（补全元信息：分类/状态/字数/简介等）
-    3) 抓取前 N 章免费章节
+    1) 抓取榜单页（scroll load）（每个榜单仅一页），获取：排名/书名/作者/简介/在读/状态等
+    2) 抓取详情页（补全：分类/标签/字数/等）
+    3) 抓取前 N 章免费章节（智能：只抓数据库缺失的）
     4) 将抓取到的数据写入数据库
     """
 
-    """初始化番茄爬虫"""
     def __init__(self, site_config: Dict[str, Any], db_handler: Any = None):
         """
         Args:
-            site_config: Site configuration dict. Key fields:
-                - base_url: str
-                - rank_urls: dict[str, str] (url template supports {page})
-                - pages_per_rank: int
-                - chapter_extraction_goal: int
-                - selenium_specific: optional selenium overrides
-            db_handler:
-                - save_rank_snapshot(...)
-                - upsert_first_n_chapters(...)
+            site_config: 可覆盖 config.WEBSITES['fanqie'] 的部分配置
+            db_handler: 你的 DBHandler 实例（可选）
         """
-        root_cfg = (getattr(config, "WEBSITES", {}) or {}).get("qidian", {}) or {}
+        root_cfg = (getattr(config, "WEBSITES", {}) or {}).get("fanqie", {}) or {}
         merged_cfg = self._deep_merge_dict(root_cfg, site_config or {})
 
         super().__init__(merged_cfg, db_handler=db_handler)
-        self.config = merged_cfg
 
-        self.default_chapter_count = int(site_config.get("chapter_extraction_goal", 5))
+        self.default_chapter_count = int(self.site_config.get("chapter_extraction_goal", 5))
         self.rank_type_map: Dict[str, RankIdentity] = self._build_rank_type_map()
-
-        # 字体解密映射
         self.char_map = FANQIE_CHAR_MAP
 
     # ------------------------------------------------------------------
-    # Utils
+    # Utils: decrypt
     # ------------------------------------------------------------------
-    """解密字体加密的文本"""
+    """解码text"""
     def _decrypt_text(self, text: str) -> str:
         if not text:
             return text
+        return "".join(self.char_map.get(ch, ch) for ch in text)
 
-        result = []
-        for char in text:
-            if char in self.char_map:
-                result.append(self.char_map[char])
-            else:
-                result.append(char)
-
-        return ''.join(result)
-
-    """解密HTML中的所有加密文字"""
+    """解码html"""
     def _decrypt_html(self, html: str) -> str:
+        if not html:
+            return html
         for encrypted_char, real_char in self.char_map.items():
             if encrypted_char != real_char:
                 html = html.replace(encrypted_char, real_char)
-
         return html
 
+    """normalize 解码后的text"""
+    def _clean_decrypt(self, text: str) -> str:
+        return self._normalize_text(self._decrypt_text(text or ""))
+
+    # ------------------------------------------------------------------
+    # Utils: ids / urls
+    # ------------------------------------------------------------------
     """从番茄的小说url中获取番茄的uid"""
     def _extract_novel_id_from_url(self, url: str) -> str:
-        """Extract Fanqie novel id (digits) from URL."""
         patterns = [
             r"/book/(\d+)",
             r"/page/(\d+)",
@@ -101,133 +95,223 @@ class FanqieSpider(BaseSpider):
             m = re.search(p, url or "")
             if m:
                 return m.group(1)
+
         for part in (url or "").split("/"):
             if part.isdigit() and len(part) >= 6:
                 return part
         return ""
 
-    """给URL添加 enter_from=Rank 参数"""
+    """番茄特有的url格式"""
     def _add_enter_from_param(self, url: str) -> str:
-        """
-        Args:
-            url: 原始URL
-
-        Returns:
-            添加了参数的URL
-        """
         if not url:
             return url
+        if "?" in url:
+            return url if "enter_from=" in url else f"{url}&enter_from=Rank"
+        return f"{url}?enter_from=Rank"
 
-        # 检查URL是否已经有查询参数
-        if '?' in url:
-            # 检查是否已经包含 enter_from 参数
-            if 'enter_from=' in url:
-                # 如果已经包含，保持原样
-                return url
-            else:
-                # 添加 enter_from=Rank 参数
-                return f"{url}&enter_from=Rank"
-        else:
-            # 没有查询参数，直接添加
-            return f"{url}?enter_from=Rank"
-
+    # ------------------------------------------------------------------
+    # Config helpers
+    # ------------------------------------------------------------------
     """Build mapping from config rank_type to normalized RankIdentity."""
     def _build_rank_type_map(self) -> Dict[str, RankIdentity]:
-        # 首先检查 site_config 中的自定义映射
-        custom = self.site_config.get("rank_type_map")
+        """
+        优先级：
+          1) site_config.rank_type_map（外部覆盖）
+          2) config.WEBSITES['fanqie'].rank_type_map
+          3) fallback：对 rank_urls 的每个 key，用 key 本身作为 rank_family
+        """
+        custom = (self.site_config or {}).get("rank_type_map")
         if isinstance(custom, dict) and custom:
             out: Dict[str, RankIdentity] = {}
             for k, v in custom.items():
                 out[k] = RankIdentity(
-                    rank_family=v.get("rank_family", k),
-                    rank_sub_cat=v.get("rank_sub_cat", "") or "",
+                    rank_family=(v or {}).get("rank_family", k),
+                    rank_sub_cat=(v or {}).get("rank_sub_cat", "") or "",
                 )
             return out
 
-        # 然后尝试从 config.WEBSITES 中获取
-        try:
-            from config import WEBSITES
-            qidian_config = WEBSITES.get("qidian", {})
-            if qidian_config:
-                config_rank_type_map = qidian_config.get("rank_type_map")
-                if isinstance(config_rank_type_map, dict) and config_rank_type_map:
-                    out: Dict[str, RankIdentity] = {}
-                    for k, v in config_rank_type_map.items():
-                        out[k] = RankIdentity(
-                            rank_family=v.get("rank_family", k),
-                            rank_sub_cat=v.get("rank_sub_cat", "") or "",
-                        )
-                    return out
-        except ImportError:
-            # 如果无法导入 config，则继续使用默认映射
-            pass
-        except Exception as e:
-            self.logger.warning(f"从 config 获取 rank_type_map 失败: {e}")
+        fanqie_cfg = (getattr(config, "WEBSITES", {}) or {}).get("fanqie", {}) or {}
+        cfg_map = fanqie_cfg.get("rank_type_map")
+        if isinstance(cfg_map, dict) and cfg_map:
+            out: Dict[str, RankIdentity] = {}
+            for k, v in cfg_map.items():
+                out[k] = RankIdentity(
+                    rank_family=(v or {}).get("rank_family", k),
+                    rank_sub_cat=(v or {}).get("rank_sub_cat", "") or "",
+                )
+            return out
+
+        # fallback：把 rank_urls 的 key 当 family（保证不会返回 None 导致后续崩）
+        out: Dict[str, RankIdentity] = {}
+        rank_urls = (self.site_config or {}).get("rank_urls", {}) or {}
+        for k in rank_urls.keys():
+            out[k] = RankIdentity(rank_family=k, rank_sub_cat="")
+        return out
+
+    def _cfg_detail_rules(self) -> Dict[str, Any]:
+        return (self.site_config or {}).get("detail_fallback_rules", {}) or {}
+
+    def _should_fill_when_empty(self, field: str, current_value: Any) -> bool:
+        """
+        fanqie 用 detail_fallback_rules 控制补全行为（和你 qidian 的逻辑一致风格）
+        """
+        rules = self._cfg_detail_rules().get(field, {}) or {}
+        when_empty = bool(rules.get("when_empty", True))
+        when_zero = bool(rules.get("when_zero", True))
+
+        if current_value is None:
+            return True
+        if isinstance(current_value, str):
+            return when_empty and (current_value.strip() == "")
+        if isinstance(current_value, (list, tuple, set, dict)):
+            return when_empty and (len(current_value) == 0)
+        if isinstance(current_value, (int, float)):
+            return when_zero and (current_value == 0)
+        return False
+
+    def _set_if_needed(self, detail: Dict[str, Any], field: str, value: Any) -> None:
+        if value is None:
+            return
+        cur = detail.get(field)
+        if self._should_fill_when_empty(field, cur):
+            detail[field] = value
+
+    def _meta_content(self, soup: BeautifulSoup, selector: str) -> str:
+        meta = soup.select_one(selector)
+        if meta and meta.get("content"):
+            return (meta.get("content") or "").strip()
+        return ""
+
+    def _text_of(self, elem: Any) -> str:
+        if not elem:
+            return ""
+        return (elem.get_text(strip=True) or "").strip()
 
     # ------------------------------------------------------------------
-    # Page fetching with scroll loading
+    # Publish date extraction (YYYY-MM-DD)
+    # ------------------------------------------------------------------
+    def _extract_date_ymd_from_text(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        s = self._normalize_text(text)
+
+        m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", s)
+        if m:
+            y, mo, d = m.group(1), m.group(2).zfill(2), m.group(3).zfill(2)
+            return f"{y}-{mo}-{d}"
+
+        m = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", s)
+        if m:
+            y, mo, d = m.group(1), m.group(2).zfill(2), m.group(3).zfill(2)
+            return f"{y}-{mo}-{d}"
+
+        m = re.search(r"(\d{4})[./](\d{1,2})[./](\d{1,2})", s)
+        if m:
+            y, mo, d = m.group(1), m.group(2).zfill(2), m.group(3).zfill(2)
+            return f"{y}-{mo}-{d}"
+
+        return None
+
+    def _extract_publish_date_ymd(self, soup: BeautifulSoup) -> Optional[str]:
+        try:
+            meta = soup.select_one(
+                'meta[property="article:published_time"], meta[name="publish_date"], meta[name="date"], meta[itemprop="datePublished"]'
+            )
+            if meta and meta.get("content"):
+                parsed = self._extract_date_ymd_from_text(meta.get("content", ""))
+                if parsed:
+                    return parsed
+
+            page_text = self._normalize_text(soup.get_text(" ", strip=True))
+            for pat in [
+                r"发布日期[:：]\s*([^\s]+)",
+                r"更新时间[:：]\s*([^\s]+)",
+                r"发表时间[:：]\s*([^\s]+)",
+                r"首发时间[:：]\s*([^\s]+)",
+                r"上架时间[:：]\s*([^\s]+)",
+            ]:
+                m = re.search(pat, page_text)
+                if m:
+                    parsed = self._extract_date_ymd_from_text(m.group(1))
+                    if parsed:
+                        return parsed
+
+            candidates = soup.find_all(string=re.compile(r"\d{4}([年./-])\d{1,2}([月./-])\d{1,2}"))
+            for t in candidates:
+                if isinstance(t, str):
+                    parsed = self._extract_date_ymd_from_text(t)
+                    if parsed:
+                        return parsed
+
+            return None
+        except Exception as e:
+            self.logger.debug(f"extract publish date ymd failed: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # Hooks for BaseSpider._get_soup
     # ------------------------------------------------------------------
     def _postprocess_html(self, html: str) -> str:
         return self._decrypt_html(html)
 
     def _scroll_load(
-            self,
-            target_count: Optional[int] = None,
-            max_scroll_attempts: Optional[int] = None,
-            item_css: Optional[str] = None,
-            scroll_pause_sec: Optional[float] = None,
-            no_change_limit: int = 3,
+        self,
+        target_count: Optional[int] = None,
+        max_scroll_attempts: Optional[int] = None,
+        item_css: Optional[str] = None,
+        scroll_pause_sec: Optional[float] = None,
+        no_change_limit: int = 3,
     ) -> None:
-        scroll_cfg = (self.site_config or {}).get("selenium_specific", {}) or {}
+        """
+        番茄榜单页：滚动加载更多卡片
+        """
+        sel_cfg = (self.site_config or {}).get("selenium_specific", {}) or {}
 
         if target_count is None:
-            target_count = int(scroll_cfg.get("target_count", 30))
+            target_count = int(sel_cfg.get("target_count", 30))
         if max_scroll_attempts is None:
-            max_scroll_attempts = int(scroll_cfg.get("max_scroll_attempts", 10))
+            max_scroll_attempts = int(sel_cfg.get("max_scroll_attempts", 10))
+
         if item_css is None:
-            item_css = scroll_cfg.get("item_css", ".rank-book-item, .book-item")
+            item_css = sel_cfg.get("item_css", ".rank-book-item, .book-item, .book-list-item, .rank-item")
+
+        # 兼容 config 里叫 scroll_delay（你现在 config.py 就是这个字段名）
         if scroll_pause_sec is None:
-            scroll_pause_sec = float(scroll_cfg.get("scroll_pause_sec", 2.5))
+            scroll_pause_sec = float(sel_cfg.get("scroll_pause_sec", sel_cfg.get("scroll_delay", 2.5)))
 
         last_height = self.driver.execute_script("return document.body.scrollHeight")
         no_change_count = 0
         loaded_items = 0
 
-        for i in range(max_scroll_attempts):
-            # scroll to bottom
+        for _ in range(max_scroll_attempts):
             self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(scroll_pause_sec)
 
             new_height = self.driver.execute_script("return document.body.scrollHeight")
-
             if new_height == last_height:
                 no_change_count += 1
                 if no_change_count >= no_change_limit:
-                    self.logger.info(f"滚动高度连续 {no_change_count} 次未变化，停止滚动")
+                    self.logger.info(f"[滚动加载]滚动高度连续 {no_change_count} 次未变化，停止滚动")
                     break
             else:
                 no_change_count = 0
                 last_height = new_height
 
-            # count loaded items
             try:
                 current_items = self.driver.find_elements(By.CSS_SELECTOR, item_css)
                 if len(current_items) > loaded_items:
                     loaded_items = len(current_items)
-                    self.logger.debug(f"滚动后加载项目数: {loaded_items}")
-
                 if loaded_items >= target_count:
-                    self.logger.info(f"已达到目标数量 {target_count}，停止滚动")
+                    self.logger.info(f"[滚动加载] 已达到目标数量 {target_count}，停止滚动")
                     break
-            except Exception as e:
-                self.logger.debug(f"检查项目数出错: {e}")
+            except Exception:
+                pass
 
-            self._humanlike_sleep(1, 2)
+            self._humanlike_sleep(0.8, 1.5)
 
     # ------------------------------------------------------------------
-    # Rank Page Parsing -> novel_id, category, tag
+    # Rank parsing
     # ------------------------------------------------------------------
-    """Parse Rank Page soup into raw rank items"""
     def _parse_rank_page(self, soup: BeautifulSoup, *, rank_type: str, page: int) -> List[Dict[str, Any]]:
         selectors = [
             ".rank-book-item",
@@ -238,7 +322,7 @@ class FanqieSpider(BaseSpider):
 
         for sel in selectors:
             nodes = soup.select(sel)
-            if not nodes or len(nodes) < 3:
+            if not nodes:
                 continue
 
             out: List[Dict[str, Any]] = []
@@ -246,121 +330,91 @@ class FanqieSpider(BaseSpider):
                 b = self._parse_rank_item(node, idx=idx, page=page, rank_type=rank_type)
                 if b:
                     out.append(b)
-            if out:
+
+            if len(out) >= 3:
                 return out
 
         return []
 
-    """Parse one rank item node into a standardized dict."""
     def _parse_rank_item(self, node: Any, *, idx: int, page: int, rank_type: str) -> Optional[Dict[str, Any]]:
         try:
-            # 提取标题和URL
-            title_elem = node.select_one('.title a, h3 a, .book-title a')
+            title_elem = node.select_one('.title a, h3 a, .book-title a, a[href*="/page/"], a[href*="/book/"]')
             if not title_elem:
                 return None
 
-            title_raw = title_elem.text.strip()
-            title = self._decrypt_text(title_raw)
-
+            title = self._decrypt_text(title_elem.get_text(strip=True)).strip()
             url = self._to_abs_url(title_elem.get("href", ""))
             if not url:
                 return None
 
-            pid = self._extract_novel_id_from_url(url) or f"fanqie_{page}_{idx}"
+            pid = self._extract_novel_id_from_url(url)
+            if not pid:
+                return None
 
-            # rank (assume 20/page typical)
-            global_rank = (page - 1) * 20 + idx
+            per_page = int((self.site_config or {}).get("selenium_specific", {}).get("target_count", 30) or 30)
+            global_rank = (page - 1) * per_page + idx
 
-            # 提取作者
             author = "未知"
-            author_elem = node.select_one('.author a, .author-name a, .writer a')
+            author_elem = node.select_one('.author a, .author-name a, .writer a, .author-name, .author')
             if author_elem:
-                author_raw = author_elem.text.strip()
-                author = self._decrypt_text(author_raw)
+                author = self._decrypt_text(author_elem.get_text(strip=True)).strip() or author
 
-            # 提取简介
             intro = ""
-            intro_elem = node.select_one('.desc.abstract, .intro, .description')
+            intro_elem = node.select_one('.desc.abstract, .intro, .description, .book-desc, .desc')
             if intro_elem:
-                intro_raw = intro_elem.text.strip()
-                intro = self._decrypt_text(intro_raw)
-                intro = self._normalize_text(intro)
+                intro = self._normalize_text(self._decrypt_text(intro_elem.get_text(strip=True)))
 
-            # 提取状态
             status = "连载中"
-            status_elem = node.select_one('.book-item-footer-status, .status, .state')
+            status_elem = node.select_one('.book-item-footer-status, .status, .state, .book-status')
             if status_elem:
-                status_raw = status_elem.text.strip()
-                status_text = self._decrypt_text(status_raw)
-                if "完结" in status_text or "完本" in status_text:
+                st = self._decrypt_text(status_elem.get_text(strip=True))
+                if "完结" in st or "完本" in st:
                     status = "完本"
-                else:
+                elif "连载" in st:
                     status = "连载中"
 
-            # 提取在读人数
             reading_count = 0
             reading_count_text = ""
-            count_elem = node.select_one('.book-item-count, .read-count, .count')
+            count_elem = node.select_one('.book-item-count, .read-count, .count, .reading-count, .hot-num, .popularity')
             if count_elem:
-                count_raw = count_elem.text.strip()
-                reading_count_text = self._decrypt_text(count_raw)
-
-                # 提取数字部分
-                clean_text = reading_count_text.replace('在读：', '').replace('阅读：', '')
-                reading_count = self._parse_cn_number(clean_text) or 0
-
-            # 提取分类/标签
-            tags = []
-            tag_elements = node.select('.tag, .tags span, .label')
-            for tag_elem in tag_elements:
-                tag_raw = tag_elem.text.strip()
-                tag = self._decrypt_text(tag_raw)
-                if tag and tag not in tags:
-                    tags.append(tag)
-
-            # 主分类（第一个标签或默认）
-            main_category = tags[0] if tags else ""
-
-            # 提取封面
-            cover_url = ""
-            cover_elem = node.select_one('.book-cover-img, .cover img')
-            if cover_elem:
-                cover_url = cover_elem.get('src', '')
-
-            # 提取最新章节
-            last_chapter = ""
-            last_chapter_elem = node.select_one('.chapter, .latest-chapter')
-            if last_chapter_elem:
-                chapter_raw = last_chapter_elem.text.strip()
-                last_chapter = self._decrypt_text(chapter_raw)
-
-            # 提取更新时间
-            update_time = ""
-            update_time_elem = node.select_one('.book-item-footer-time, .update-time')
-            if update_time_elem:
-                time_raw = update_time_elem.text.strip()
-                update_time = self._decrypt_text(time_raw)
+                reading_count_text = self._decrypt_text(count_elem.get_text(strip=True))
+                clean = (
+                    reading_count_text.replace("在读：", "")
+                    .replace("在读", "")
+                    .replace("阅读：", "")
+                    .replace("阅读", "")
+                    .replace("人", "")
+                    .strip()
+                )
+                reading_count = self._parse_cn_number(clean) or 0
+            else:
+                text_blob = self._normalize_text(node.get_text(" ", strip=True))
+                m = re.search(r"(在读|阅读)[:：]?\s*([\d\.万亿]+)", text_blob)
+                if m:
+                    reading_count_text = m.group(0)
+                    reading_count = self._parse_cn_number(m.group(2)) or 0
 
             return {
                 "platform": "fanqie",
                 "platform_novel_id": pid,
+                "novel_id": pid,
+
                 "title": title,
                 "author": author,
                 "intro": intro,
-                "main_category": main_category,
-                "tags": tags,
                 "status": status,
-                "total_words": 0,  # detail page fills
-                "url": url,
-                "rank": global_rank,
-                "reading_count": reading_count,
+                "reading_count": int(reading_count),
                 "reading_count_text": reading_count_text,
+
+                "url": url,
+                "rank": int(global_rank),
                 "rank_type": rank_type,
-                "cover_url": cover_url,
-                "last_chapter": last_chapter,
-                "update_time": update_time,
                 "fetch_date": self._today_str(),
-                "fetch_time": time.strftime('%H:%M:%S'),
+                "fetch_time": time.strftime("%H:%M:%S"),
+
+                "main_category": "",
+                "tags": [],
+                "total_words": 0,
             }
 
         except Exception as e:
@@ -370,56 +424,60 @@ class FanqieSpider(BaseSpider):
     # ------------------------------------------------------------------
     # BaseSpider API: fetch_rank_list
     # ------------------------------------------------------------------
-    """Fetch a rank list (multi-page) and return standardized items"""
-    def fetch_rank_list(self, rank_type: str = "", pages: int = 5) -> List[Dict[str, Any]]:
-        """
-        Args:
-            rank_type: key in site_config["rank_urls"]
-
-        Returns:
-            List of dicts (raw rank items). Each dict includes:
-            - platform, platform_novel_id, title, author, intro
-            - main_category, tags
-            - status, total_words, url
-            - rank, reading_count
-        """
+    def fetch_rank_list(self, rank_type: str = "", pages: int = 1) -> List[Dict[str, Any]]:
         url_template = (self.site_config.get("rank_urls") or {}).get(rank_type)
         if not url_template:
             self.logger.error(f"rank_type not configured in rank_urls: {rank_type}")
             return []
 
-        pages = int(self.site_config.get("pages_per_rank", 5))
+        if pages is None or int(pages) <= 0:
+            pages = int(self.site_config.get("pages_per_rank", 1))
+        else:
+            pages = int(pages)
+
+        sel_cfg = (self.site_config or {}).get("selenium_specific", {}) or {}
+        wait_css = sel_cfg.get(
+            "wait_css",
+            ".rank-book-item, .book-item, .book-list-item, .rank-item, a[href*='/page/'], a[href*='/book/']"
+        )
+
         all_items: List[Dict[str, Any]] = []
+        seen_pid: set[str] = set()
+        seen_url: set[str] = set()
 
         for page in range(1, pages + 1):
             url = url_template.format(page=page) if "{page}" in url_template else url_template
             if page > 1 and "{page}" not in url_template:
-                break  # 如果没有分页参数，只抓取第一页
+                break
 
             self.logger.info(f"当前榜单[{rank_type}] page {page}/{pages}: {url}")
 
-            soup = self._get_soup(
-                url,
-                wait_css="...",
-                is_scrolling=True,
-            )
-
+            soup = self._get_soup(url, wait_css=wait_css, is_scrolling=True)
             if not soup:
                 continue
 
             page_items = self._parse_rank_page(soup, rank_type=rank_type, page=page)
 
-            # 去重
-            seen_urls = set()
-            unique_items = []
+            unique_items: List[Dict[str, Any]] = []
             for item in page_items:
-                url = item.get("url", "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
+                pid = (item.get("platform_novel_id") or item.get("novel_id") or "").strip()
+                u = (item.get("url") or "").strip()
+
+                if pid:
+                    if pid in seen_pid:
+                        continue
+                    seen_pid.add(pid)
+                    unique_items.append(item)
+                    continue
+
+                if u:
+                    if u in seen_url:
+                        continue
+                    seen_url.add(u)
                     unique_items.append(item)
 
             all_items.extend(unique_items)
-            self.logger.info(f"Page {page}: found {len(page_items)} items, {len(unique_items)} unique")
+            self.logger.info(f"Page {page}: found {len(page_items)} items, {len(unique_items)} unique (global)")
 
             if page < pages:
                 self._humanlike_sleep(1, 3)
@@ -427,329 +485,143 @@ class FanqieSpider(BaseSpider):
         return all_items
 
     # ------------------------------------------------------------------
-    # Detail Page -> title, author, intro, status, total_recommend
+    # Detail parsing helpers
     # ------------------------------------------------------------------
-    """从 Detail Page soup中获取书名，作者，和简介并填充输入db的dict"""
     def _fill_detail_title_author_intro(self, soup: BeautifulSoup, detail: Dict[str, Any]) -> None:
-        # 提取标题
-        if not detail.get("title"):
-            title_elem = soup.select_one('meta[property="og:title"]') or soup.select_one(
-                'h1, .info-name h1, .book-title, header h1'
-            )
-            if title_elem:
-                if title_elem.name == "meta":
-                    t = (title_elem.get("content", "") or "").strip()
-                    detail["title"] = self._decrypt_text(t)
-                else:
-                    title_raw = title_elem.text.strip()
-                    detail["title"] = self._decrypt_text(title_raw)
+        if self._should_fill_when_empty("title", detail.get("title")):
+            t = self._meta_content(soup, 'meta[property="og:title"]')
+            if not t:
+                t = self._text_of(soup.select_one("h1, .info-name h1, .book-title, header h1"))
+            self._set_if_needed(detail, "title", self._clean_decrypt(t))
 
-        # 提取作者
-        if not detail.get("author"):
-            author_elem = soup.select_one('meta[property="og:novel:author"]') or soup.select_one(
-                '.author-name:not(.author-desc), .author-name-text:not(.author-desc)'
-            )
-            if author_elem:
-                if author_elem.name == "meta":
-                    detail["author"] = (author_elem.get("content", "") or "").strip()
-                else:
-                    author_raw = author_elem.text.strip()
-                    detail["author"] = self._decrypt_text(author_raw)
+        if self._should_fill_when_empty("author", detail.get("author")):
+            a = self._meta_content(soup, 'meta[property="og:novel:author"]')
+            if not a:
+                a = self._text_of(soup.select_one('.author-name:not(.author-desc), .author-name-text:not(.author-desc), .author-name, .author'))
+            self._set_if_needed(detail, "author", self._clean_decrypt(a))
 
-        # 提取简介
-        if not detail.get("intro"):
-            intro_elem = soup.select_one('meta[property="og:description"]') or soup.select_one(
-                '.intro, .description, .book-intro, .content'
-            )
-            if intro_elem:
-                if intro_elem.name == "meta":
-                    intro = (intro_elem.get("content", "") or "").strip()
-                    detail["intro"] = self._decrypt_text(intro)
-                else:
-                    intro_raw = intro_elem.text.strip()
-                    detail["intro"] = self._decrypt_text(intro_raw)
+        if self._should_fill_when_empty("intro", detail.get("intro")):
+            it = self._meta_content(soup, 'meta[property="og:description"]')
+            if not it:
+                it = self._text_of(soup.select_one(".intro, .description, .book-intro, .content, .book-desc, .desc"))
+            self._set_if_needed(detail, "intro", self._clean_decrypt(it))
 
-    """Detail Pagesoup提取主分类和标签并填充并填充输入db的dict"""
     def _fill_detail_category_tags(self, soup: BeautifulSoup, detail: Dict[str, Any]) -> None:
-        # 如果已经有主分类且不是空，则跳过详情页分类提取
-        current_main = detail.get("main_category", "")
-        current_tags = detail.get("tags", [])
+        current_main = (detail.get("main_category") or "").strip()
+        current_tags = detail.get("tags") or []
 
-        if current_main:
-            self.logger.info(f"[分类处理] 已有分类信息，跳过提取 - main='{current_main}', tags={current_tags}")
+        need_main = self._should_fill_when_empty("main_category", current_main)
+        need_tags = self._should_fill_when_empty("tags", current_tags)
+        if not need_main and not need_tags:
             return
 
-        self.logger.info(f"[分类处理] 开始处理分类信息...")
+        tags: List[str] = []
 
-        tags = []
-
-        # 提取标签 - 番茄小说通常使用 info-label-grey 作为标签
-        tag_elements = soup.select('.info-label-grey')
-
-        # 如果找到了标签元素
+        tag_elements = soup.select(".info-label-grey")
         if tag_elements:
             for tag_elem in tag_elements:
-                tag_raw = tag_elem.text.strip()
-                tag = self._decrypt_text(tag_raw)
+                tag = self._clean_decrypt(self._text_of(tag_elem))
                 if tag and tag not in tags and len(tag) < 20:
                     tags.append(tag)
         else:
-            # 方法2: 尝试从info-label容器中提取
-            info_label_container = soup.select_one('.info-label')
-            if info_label_container:
-                # 获取所有span，排除第一个info-label-yellow（状态）
-                all_spans = info_label_container.find_all('span')
-                for span in all_spans:
-                    if 'info-label-yellow' not in span.get('class', []):
-                        tag_raw = span.text.strip()
-                        tag = self._decrypt_text(tag_raw)
-                        if tag and tag not in tags and len(tag) < 20:
-                            tags.append(tag)
+            container = soup.select_one(".info-label")
+            if container:
+                for span in container.find_all("span"):
+                    cls = span.get("class", []) or []
+                    if "info-label-yellow" in cls:
+                        continue
+                    tag = self._clean_decrypt(self._text_of(span))
+                    if tag and tag not in tags and len(tag) < 20:
+                        tags.append(tag)
 
-        # 更新主分类（第一个标签）
-        if tags:
-            detail["main_category"] = tags[0]
-        else:
-            detail["main_category"] = ""
+        inferred_main = tags[0] if tags else ""
+        if need_main:
+            self._set_if_needed(detail, "main_category", inferred_main)
 
-        # 合并标签
-        existing_tags = set(detail.get("tags", []))
-        new_tags = set(tags)
-        merged_tags = list(existing_tags.union(new_tags))
+        if need_tags:
+            existing_tags = list(detail.get("tags") or [])
+            merged = self._dedupe_keep_order(existing_tags + tags)
 
-        # 确保主分类不作为标签
-        main_cat = detail.get("main_category", "")
-        if main_cat in merged_tags:
-            merged_tags.remove(main_cat)
+            main_cat = (detail.get("main_category") or "").strip()
+            if main_cat and main_cat in merged:
+                merged = [t for t in merged if t != main_cat]
+            detail["tags"] = merged
 
-        detail["tags"] = self._dedupe_keep_order(merged_tags)
-        self.logger.info(f"[分类处理] 最终结果 - main='{detail['main_category']}', tags={detail['tags']}")
-
-    """详情页soup提取是否完结并填充并填充输入db的dict"""
     def _fill_detail_status_words(self, soup: BeautifulSoup, detail: Dict[str, Any], page_url: str = "") -> None:
-        if page_url:
-            self.logger.info(f"[数据补完] 正在从详情页获取完本/连载状态以及总字数: {page_url}")
-
         try:
-            # 提取状态
-            if not detail.get("status"):
-                # 方法1: 从info-label-yellow提取
-                status_elem = soup.select_one('.info-label-yellow')
+            need_status = self._should_fill_when_empty("status", detail.get("status"))
+            need_words = self._should_fill_when_empty("total_words", detail.get("total_words"))
+            if not need_status and not need_words:
+                return
+
+            if need_status:
+                status_val = ""
+                status_elem = soup.select_one(".info-label-yellow")
                 if status_elem:
-                    status_raw = status_elem.text.strip()
-                    status_text = self._decrypt_text(status_raw)
-                    if '完结' in status_text:
-                        detail["status"] = "完本"
-                    elif '连载' in status_text:
-                        detail["status"] = "连载中"
-                    else:
-                        detail["status"] = status_text
-                else:
-                    # 方法2: 回退到旧的选择器
-                    status_selectors = ['.book-state, .status, .state']
-                    for selector in status_selectors:
-                        status_elem = soup.select_one(selector)
-                        if status_elem:
-                            status_raw = status_elem.text.strip()
-                            status_text = self._decrypt_text(status_raw)
-                            if '完结' in status_text:
-                                detail["status"] = "完本"
-                            elif '连载' in status_text:
-                                detail["status"] = "连载中"
-                            break
+                    st = self._clean_decrypt(self._text_of(status_elem))
+                    if "完结" in st or "完本" in st:
+                        status_val = "完本"
+                    elif "连载" in st:
+                        status_val = "连载中"
 
-            # 提取总字数
-            if not detail.get("total_words"):
+                if not status_val:
+                    e = soup.select_one(".book-state, .status, .state, .book-status")
+                    if e:
+                        st = self._clean_decrypt(self._text_of(e))
+                        if "完结" in st or "完本" in st:
+                            status_val = "完本"
+                        elif "连载" in st:
+                            status_val = "连载中"
+
+                if status_val:
+                    detail["status"] = status_val
+
+            if need_words:
                 total_words = 0
-                # 方法1: 使用新的HTML结构
-                word_count_elem = soup.select_one('.info-count-word')
+                word_count_elem = soup.select_one(".info-count-word")
                 if word_count_elem:
-                    # 提取数字部分和单位
-                    detail_elem = word_count_elem.select_one('.detail')
-                    text_elem = word_count_elem.select_one('.text')
-
-                    if detail_elem and text_elem:
-                        detail_raw = detail_elem.text.strip()
-                        detail_text = self._decrypt_text(detail_raw)
-                        unit_raw = text_elem.text.strip()
-                        unit_text = self._decrypt_text(unit_raw)
-
+                    detail_elem = word_count_elem.select_one(".detail")
+                    unit_elem = word_count_elem.select_one(".text")
+                    if detail_elem and unit_elem:
+                        num_text = self._clean_decrypt(self._text_of(detail_elem))
+                        unit_text = self._clean_decrypt(self._text_of(unit_elem))
                         try:
-                            num = float(detail_text)
-                            # 根据单位转换
-                            if '万' in unit_text:
-                                total_words = int(num * 10000)
-                            else:
-                                total_words = int(num)
-                        except ValueError:
-                            self.logger.debug(f"无法转换字数: {detail_text}")
+                            num = float(num_text)
+                            total_words = int(num * 10000) if ("万" in unit_text) else int(num)
+                        except Exception:
+                            pass
 
                 if total_words == 0:
-                    # 方法2: 回退到旧的选择器
-                    words_selectors = ['.book-info-item, .info-item']
-                    for selector in words_selectors:
-                        info_elem = soup.select_one(selector)
-                        if info_elem:
-                            info_raw = info_elem.text.strip()
-                            info_text = self._decrypt_text(info_raw)
-                            if '字数' in info_text:
-                                words_match = re.search(r'字数[：:]\s*([0-9.]+[万亿]?)', info_text)
-                                if words_match:
-                                    total_words = self._parse_cn_number(words_match.group(1)) or 0
-                                break
+                    page_text = self._clean_decrypt(soup.get_text(" ", strip=True))
+                    m = re.search(r"字数[：:]\s*([0-9.]+[万亿]?)", page_text)
+                    if m:
+                        total_words = self._parse_cn_number(m.group(1)) or 0
 
-                detail["total_words"] = total_words
-
-            # 记录提取结果
-            self.logger.info(f"小说状态: '{detail.get('status')}', 小说总字数: {detail.get('total_words')}")
+                if total_words > 0:
+                    detail["total_words"] = int(total_words)
 
         except Exception as e:
-            self.logger.error(f"Error extracting status and word count from page: {e}")
+            self.logger.error(f"Error extracting status/word count: {e}")
 
-    """从番茄的小说url中获取番茄的uid"""
-    def _extract_chapter_links(self, soup: BeautifulSoup, book_id: str, max_chapters: int = 5) -> List[Tuple[str, str, str, int]]:
-        chapter_links = []
-
+    def _extract_publish_date(self, soup: BeautifulSoup, detail: Dict[str, Any]) -> None:
         try:
-            self.logger.info("开始提取章节链接...")
-
-            # 尝试多种选择器
-            chapter_selectors = [
-                '.page-directory-content .chapter-item',
-                '.chapter-item-list .chapter-item',
-                'li[data-chapter-id]',
-                '.chapter-list li',
-                '.directory-list li',
-                '.chapter-list-item'
-            ]
-
-            chapter_items = []
-            used_selector = None
-
-            for selector in chapter_selectors:
-                items = soup.select(selector)
-                if items and len(items) > 0:
-                    chapter_items = items
-                    used_selector = selector
-                    self.logger.info(f"使用选择器 '{selector}' 找到 {len(items)} 个章节项")
-                    break
-
-            if not chapter_items:
-                # 尝试查找所有链接
-                links = soup.find_all('a', href=True)
-                chapter_links_found = [link for link in links if '/reader/' in link.get('href', '') and '#detail' not in link.get('href', '')]
-                if chapter_links_found:
-                    self.logger.info(f"通过链接查找到 {len(chapter_links_found)} 个可能的章节链接")
-                    chapter_items = chapter_links_found
-                    used_selector = "a[href*='/reader/']"
-                else:
-                    self.logger.warning("未找到章节列表")
-                    return chapter_links
-
-            # 限制章节数量
-            chapter_items = chapter_items[:max_chapters]
-
-            for idx, item in enumerate(chapter_items):
-                try:
-                    # 提取章节标题和链接
-                    if item.name == 'a':
-                        # 直接是链接元素
-                        chapter_link = item
-                    else:
-                        # 查找链接
-                        chapter_link = item.find('a', href=True) or item.select_one('a[href]')
-
-                    if not chapter_link:
-                        continue
-
-                    chapter_url = chapter_link.get('href', '')
-                    chapter_title = chapter_link.get_text(strip=True)
-
-                    # 解密章节标题
-                    chapter_title = self._decrypt_text(chapter_title)
-
-                    # 构建完整URL
-                    if chapter_url.startswith('/'):
-                        chapter_url = f"https://fanqienovel.com{chapter_url}"
-                    elif not chapter_url.startswith('http'):
-                        chapter_url = f"https://fanqienovel.com/{chapter_url.lstrip('/')}"
-
-                    # 提取章节ID
-                    chapter_id = ""
-                    if '/reader/' in chapter_url:
-                        chapter_id = chapter_url.split('/reader/')[-1].split('?')[0].split('#')[0]
-
-                    if not chapter_id:
-                        continue
-
-                    # 章节序号（番茄可能显示章节号）
-                    chapter_index = idx + 1
-
-                    # 尝试从元素中提取章节序号
-                    if item.name != 'a':
-                        index_elem = item.select_one('.chapter-num, .chapter-index, .num')
-                        if index_elem:
-                            index_text = index_elem.get_text(strip=True)
-                            try:
-                                chapter_index = int(re.findall(r'\d+', index_text)[0])
-                            except:
-                                pass
-
-                    chapter_links.append((chapter_title, chapter_url, chapter_id, chapter_index))
-                    self.logger.debug(f"提取章节 {chapter_index}: {chapter_title} - {chapter_id}")
-
-                except Exception as e:
-                    self.logger.debug(f"提取章节链接失败: {e}")
-                    continue
-
-            self.logger.info(f"成功提取 {len(chapter_links)} 个章节链接")
-
+            d = self._extract_publish_date_ymd(soup)
+            detail["publish_date"] = d or ""
         except Exception as e:
-            self.logger.error(f"提取章节链接过程出错: {e}")
-
-        return chapter_links
+            self.logger.error(f"提取上架时间失败: {e}")
+            detail["publish_date"] = ""
 
     # ------------------------------------------------------------------
     # BaseSpider API: fetch_novel_detail
     # ------------------------------------------------------------------
-    """获取小说metadata and normalize"""
     def fetch_novel_detail(self, novel_url: str, pid: str, seed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Fetch novel detail page and extract normalized metadata.
-
-        Args:
-            novel_url: Fanqie book url
-            novel_id: optional platform novel id; if empty, extracted from url
-
-        Returns:
-            dict with fields:
-            - platform, platform_novel_id, url
-            - title, author, intro
-            - main_category, tags
-            - status (ongoing/completed), total_words (int)
-            - reading_count
-            - publish_date
-        """
-        pid = pid or self._extract_novel_id_from_url(novel_url)
+        pid = (pid or self._extract_novel_id_from_url(novel_url) or "").strip()
         if pid and pid in self.book_cache:
             return self.book_cache[pid]
 
-        # seed（如榜单页已抓到的 title/author/category/tags 等）可用于减少后续依赖页面解析失败的影响
         seed = seed or {}
 
-        # 给URL添加 enter_from=Rank 参数
-        detail_url = self._add_enter_from_param(novel_url)
-        self.logger.info(f"访问详情页: {detail_url}")
-
-        # 访问详情页
-        soup = self._get_soup(
-            detail_url,
-            wait_css="...",
-            is_scrolling=True,
-            target_count=30,  # 可省略，走 config
-            max_scroll_attempts=10,  # 可省略，走 config
-        )
-
-        if not soup:
+        def _empty_payload() -> Dict[str, Any]:
             return {
                 "platform": "fanqie",
                 "platform_novel_id": pid,
@@ -765,326 +637,273 @@ class FanqieSpider(BaseSpider):
                 "publish_date": "",
             }
 
-        detail: Dict[str, Any] = {
-            "platform": "fanqie",
-            "platform_novel_id": pid,
-            "url": novel_url,  # 原始URL
-            "title": "",
-            "author": "",
-            "intro": "",
-            "main_category": "",
-            "tags": [],
-            "status": "",
-            "total_words": 0,
-            "reading_count": 0,
-            "publish_date": "",
-        }
+        # helper 先定义，避免 not soup 分支里“先用后定义”崩溃
+        def _apply_seed_to_detail(detail_dict: Dict[str, Any], seed_dict: Dict[str, Any]) -> None:
+            if not seed_dict:
+                return
 
+            rank_primary = (self.site_config or {}).get("rank_fields_primary", []) or []
+            if not rank_primary:
+                rank_primary = ["platform_novel_id", "title", "author", "intro", "reading_count", "status"]
+
+            for k in rank_primary:
+                if k in ("platform_novel_id", "platform", "url"):
+                    continue
+                if seed_dict.get(k) is None:
+                    continue
+                if k == "tags":
+                    detail_dict["tags"] = list(seed_dict.get("tags") or [])
+                else:
+                    detail_dict[k] = seed_dict.get(k)
+
+            if not detail_dict.get("platform_novel_id") and seed_dict.get("novel_id"):
+                detail_dict["platform_novel_id"] = seed_dict.get("novel_id")
+
+        sel_cfg = (self.site_config or {}).get("selenium_specific", {}) or {}
+        wait_css = sel_cfg.get("detail_wait_css", sel_cfg.get("wait_css", ".info-label, .info-count-item, meta[property='og:title'], h1"))
+        is_scrolling = bool(sel_cfg.get("detail_is_scrolling", False))
+
+        detail_url = self._add_enter_from_param(novel_url)
+        self.logger.info(f"访问详情页: {detail_url}")
+
+        soup = self._get_soup(detail_url, wait_css=wait_css, is_scrolling=is_scrolling)
+
+        if not soup:
+            out = _empty_payload()
+            _apply_seed_to_detail(out, seed)
+            if pid:
+                self.book_cache[pid] = out
+            return out
+
+        detail = _empty_payload()
+
+        # 1) rank seed 先写入（rank 为主来源字段）
+        _apply_seed_to_detail(detail, seed)
+
+        # 2) detail 页补全（按规则只补缺失）
         self._fill_detail_title_author_intro(soup, detail)
         self._fill_detail_category_tags(soup, detail)
         self._fill_detail_status_words(soup, detail, page_url=detail_url)
         self._extract_publish_date(soup, detail)
 
-        # seed fallback：榜单页若已抓到 title/category/tags 等，可用于补全（避免日志里退化成小说ID）
-        if seed:
-            for k in ["title", "author", "intro", "main_category", "status", "publish_date"]:
-                if not detail.get(k) and seed.get(k):
-                    detail[k] = seed.get(k)
-            # tags / total_words / reading_count
-            if not detail.get("tags") and seed.get("tags"):
-                detail["tags"] = seed.get("tags")
-            if (not detail.get("total_words")) and seed.get("total_words"):
-                detail["total_words"] = seed.get("total_words")
-            if (not detail.get("reading_count")) and seed.get("reading_count"):
-                detail["reading_count"] = seed.get("reading_count")
+        # 3) reading_count：仅当 rank 没拿到才用 detail 扫描补（避免覆盖 rank）
+        if self._should_fill_when_empty("reading_count", detail.get("reading_count")):
+            reading_count = 0
+            for elem in soup.select(".info-count-item"):
+                tx = self._clean_decrypt(elem.get_text(strip=True))
+                if ("在读" in tx) or ("阅读" in tx):
+                    m = re.search(r"([0-9.]+[万亿]?)", tx)
+                    if m:
+                        reading_count = self._parse_cn_number(m.group(1)) or 0
+                        break
+            if reading_count:
+                detail["reading_count"] = int(reading_count)
 
-        # 提取阅读数（如果详情页有）
-        reading_count = 0
-        count_elements = soup.select('.info-count-item')
-        for elem in count_elements:
-            text_raw = elem.text.strip()
-            text = self._decrypt_text(text_raw)
-            if '在读' in text or '阅读' in text:
-                # 提取数字
-                num_match = re.search(r'([\d\.]+)[万亿]?', text)
-                if num_match:
-                    reading_count = self._parse_cn_number(num_match.group(1)) or 0
-                    break
-
-        detail["reading_count"] = reading_count
-
-        # last-resort: avoid empty title
-        if not detail.get("title") and pid:
-            detail["title"] = f"{pid}"
+        if not (detail.get("title") or "").strip() and pid:
+            detail["title"] = pid
 
         if pid:
             self.book_cache[pid] = detail
-
         return detail
 
     # ------------------------------------------------------------------
-    # Chapter Page -> FIRST_N_CHAPTERS, each w/ content, word count, publish date
+    # Chapters
     # ------------------------------------------------------------------
-    """从Chapter Page提取发布时间"""
-    def _extract_publish_date(self, soup: BeautifulSoup, detail: Dict[str, Any]) -> None:
-        """从详情页提取上架时间（首发时间）"""
-        try:
-            self.logger.debug("开始提取上架时间...")
+    def _extract_chapter_links(self, soup: BeautifulSoup, book_id: str, max_chapters: int = 5) -> List[Tuple[str, str, str, int]]:
+        chapter_links: List[Tuple[str, str, str, int]] = []
+        base_url = (self.site_config or {}).get("base_url", "https://fanqienovel.com").rstrip("/")
 
-            # 方法1: 从meta标签提取
-            meta_date = soup.select_one('meta[property="article:published_time"], meta[name="publish_date"]')
-            if meta_date and meta_date.get('content'):
-                date_str = meta_date.get('content')
-                # 尝试解析日期格式
-                date_match = re.search(r'(\d{4}-\d{2}-\d{2})', date_str)
-                if date_match:
-                    detail["publish_date"] = date_match.group(1)
-                    self.logger.info(f"从meta标签提取到上架时间: {date_match.group(1)}")
-                    return
+        chapter_selectors = [
+            ".page-directory-content .chapter-item",
+            ".chapter-item-list .chapter-item",
+            "li[data-chapter-id]",
+            ".chapter-list li",
+            ".directory-list li",
+            ".chapter-list-item",
+        ]
 
-            # 方法2: 从页面文本中提取
-            page_text = self._normalize_text(soup.get_text())
+        chapter_items = []
+        for selector in chapter_selectors:
+            items = soup.select(selector)
+            if items:
+                chapter_items = items
+                break
 
-            # 查找常见日期格式
-            date_patterns = [
-                r'发布日期[:：]\s*(\d{4}-\d{2}-\d{2})',
-                r'更新时间[:：]\s*(\d{4}-\d{2}-\d{2})',
-                r'发表时间[:：]\s*(\d{4}-\d{2}-\d{2})',
-                r'(\d{4})年(\d{1,2})月(\d{1,2})日',
-                r'(\d{4})-(\d{1,2})-(\d{1,2})',
+        if not chapter_items:
+            links = soup.find_all("a", href=True)
+            candidates = [
+                link for link in links
+                if "/reader/" in (link.get("href", "") or "") and "#detail" not in (link.get("href", "") or "")
             ]
+            chapter_items = candidates
 
-            for pattern in date_patterns:
-                match = re.search(pattern, page_text)
-                if match:
-                    if len(match.groups()) == 3:
-                        year, month, day = match.groups()
-                        detail["publish_date"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-                    elif len(match.groups()) == 1:
-                        detail["publish_date"] = match.group(1)
+        if not chapter_items:
+            return chapter_links
 
-                    self.logger.info(f"从页面文本提取到上架时间: {detail['publish_date']}")
-                    return
+        chapter_items = chapter_items[:max_chapters]
 
-            # 如果没有找到，返回空字符串
-            detail["publish_date"] = ""
-            self.logger.debug("未能提取到上架时间")
+        for idx, item in enumerate(chapter_items, 1):
+            try:
+                chapter_link = item if getattr(item, "name", None) == "a" else (item.find("a", href=True) or item.select_one("a[href]"))
+                if not chapter_link:
+                    continue
 
-        except Exception as e:
-            self.logger.error(f"提取上架时间失败: {e}")
-            detail["publish_date"] = ""
+                chapter_url = (chapter_link.get("href", "") or "").strip()
+                chapter_title = self._decrypt_text(chapter_link.get_text(strip=True)).strip()
 
-    """Parse解析章节正文内容"""
+                if chapter_url.startswith("/"):
+                    chapter_url = f"{base_url}{chapter_url}"
+                elif not chapter_url.startswith("http"):
+                    chapter_url = f"{base_url}/{chapter_url.lstrip('/')}"
+
+                chapter_id = ""
+                if "/reader/" in chapter_url:
+                    chapter_id = chapter_url.split("/reader/")[-1].split("?")[0].split("#")[0]
+                if not chapter_id:
+                    continue
+
+                chapter_index = idx
+                if getattr(item, "name", None) != "a":
+                    index_elem = item.select_one(".chapter-num, .chapter-index, .num")
+                    if index_elem:
+                        nums = re.findall(r"\d+", index_elem.get_text(strip=True))
+                        if nums:
+                            try:
+                                chapter_index = int(nums[0])
+                            except Exception:
+                                pass
+
+                chapter_links.append((chapter_title, chapter_url, chapter_id, chapter_index))
+            except Exception:
+                continue
+
+        return chapter_links
+
     def _parse_chapter_content(self, soup: BeautifulSoup) -> str:
-        """提取章节正文内容"""
         try:
-            # 尝试不同的选择器
             selectors = [
-                '.muye-reader-content',
-                '.reader-content',
-                '.chapter-content',
-                '.content-text',
-                '.chapter-entity',
-                '.read-content',
-                '.novel-content',
-                '.article-content',
+                ".muye-reader-content",
+                ".reader-content",
+                ".chapter-content",
+                ".content-text",
+                ".chapter-entity",
+                ".read-content",
+                ".novel-content",
+                ".article-content",
             ]
+
+            def _cleanup(text: str) -> str:
+                if not text:
+                    return ""
+                lines = [ln.strip() for ln in text.splitlines()]
+                lines = [ln for ln in lines if ln]
+                return "\n\n".join(lines).strip()
 
             for selector in selectors:
                 content_elem = soup.select_one(selector)
-                if content_elem:
-                    # 提取所有段落
-                    paragraphs = content_elem.select('p, div.text')
-                    if not paragraphs:
-                        # 如果没有段落，直接获取文本
-                        content_raw = content_elem.get_text(strip=True)
-                        content = self._decrypt_text(content_raw)
-                    else:
-                        # 合并段落
-                        content_parts = []
-                        for p in paragraphs:
-                            text_raw = p.get_text(strip=True)
-                            text = self._decrypt_text(text_raw)
-                            if text:
-                                content_parts.append(text)
-                        content = '\n\n'.join(content_parts)
+                if not content_elem:
+                    continue
 
-                    # 清理内容
-                    content = re.sub(r'\s+', ' ', content).strip()
+                for x in content_elem(["script", "style"]):
+                    x.decompose()
 
-                    if content:
-                        self.logger.debug(f"使用选择器 '{selector}' 找到内容，长度: {len(content)}")
-                        return content
+                paragraphs = content_elem.select("p, div.text")
+                if paragraphs:
+                    parts = []
+                    for p in paragraphs:
+                        t = self._decrypt_text(p.get_text(" ", strip=True)).strip()
+                        if t:
+                            parts.append(t)
+                    content = _cleanup("\n\n".join(parts))
+                else:
+                    content = _cleanup(self._decrypt_text(content_elem.get_text("\n", strip=True)))
 
-            # 如果上述选择器都失败，尝试查找所有p标签
-            all_paragraphs = soup.find_all('p')
-            if all_paragraphs:
-                content_parts = []
-                for p in all_paragraphs:
-                    text_raw = p.get_text(strip=True)
-                    text = self._decrypt_text(text_raw)
-                    if text and len(text) > 10:  # 过滤过短的文本
-                        content_parts.append(text)
-
-                if content_parts:
-                    content = '\n\n'.join(content_parts)
-                    self.logger.debug(f"从段落中找到内容，长度: {len(content)}")
+                if content:
                     return content
 
-            self.logger.warning("未找到章节正文内容")
-            return ""
+            ps = soup.find_all("p")
+            if ps:
+                parts = []
+                for p in ps:
+                    t = self._decrypt_text(p.get_text(" ", strip=True)).strip()
+                    if t and len(t) > 10:
+                        parts.append(t)
+                content = _cleanup("\n\n".join(parts))
+                if content:
+                    return content
 
+            return ""
         except Exception as e:
             self.logger.error(f"提取章节内容失败: {e}")
             return ""
 
-    def _extract_publish_date_from_chapter(self, soup: BeautifulSoup) -> str:
-        """从章节页面提取发布日期"""
-        try:
-            # 方法1：从meta标签提取
-            meta_date = soup.select_one('meta[property="article:published_time"], meta[name="publish_date"]')
-            if meta_date and meta_date.get('content'):
-                date_str = meta_date.get('content')
-                # 尝试解析日期格式
-                date_match = re.search(r'(\d{4}-\d{2}-\d{2})', date_str)
-                if date_match:
-                    return date_match.group(1)
-
-            # 方法2：从页面文本中提取
-            page_text = self._normalize_text(soup.get_text())
-
-            # 查找常见日期格式
-            date_patterns = [
-                r'发布日期[:：]\s*(\d{4}-\d{2}-\d{2})',
-                r'更新时间[:：]\s*(\d{4}-\d{2}-\d{2})',
-                r'发表时间[:：]\s*(\d{4}-\d{2}-\d{2})',
-                r'(\d{4})年(\d{1,2})月(\d{1,2})日',
-                r'(\d{4})-(\d{1,2})-(\d{1,2})',
-            ]
-
-            for pattern in date_patterns:
-                match = re.search(pattern, page_text)
-                if match:
-                    if len(match.groups()) == 3:
-                        year, month, day = match.groups()
-                        return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-                    elif len(match.groups()) == 1:
-                        return match.group(1)
-
-            # 方法3：查找包含日期的元素
-            date_elements = soup.find_all(string=re.compile(r'\d{4}[-年]\d{1,2}[-月]\d{1,2}'))
-            for element in date_elements:
-                if isinstance(element, str):
-                    date_match = re.search(r'(\d{4})[-年](\d{1,2})[-月](\d{1,2})', element)
-                    if date_match:
-                        year, month, day = date_match.groups()
-                        return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-
-            # 如果没有找到，返回当前日期
-            from datetime import datetime
-            return datetime.now().strftime('%Y-%m-%d')
-
-        except Exception as e:
-            self.logger.error(f"提取发布日期失败: {e}")
-            from datetime import datetime
-            return datetime.now().strftime('%Y-%m-%d')
+    def _extract_publish_date_from_chapter(self, soup: BeautifulSoup) -> Optional[str]:
+        return self._extract_publish_date_ymd(soup)
 
     def _fetch_single_chapter(self, chapter_url: str) -> Optional[Dict[str, Any]]:
-        """获取单章内容"""
         try:
-            # 访问章节页面
-            self.logger.info(f'访问章节页面: {chapter_url}')
+            self.logger.info(f"访问章节页面: {chapter_url}")
 
-            soup = self._get_soup(
-                chapter_url,
-                wait_css="...",
-                is_scrolling=True,
-                target_count=30,  # 可省略，走 config
-                max_scroll_attempts=10,  # 可省略，走 config
-            )
+            sel_cfg = (self.site_config or {}).get("selenium_specific", {}) or {}
+            wait_css = sel_cfg.get("chapter_wait_css", sel_cfg.get("wait_css", ".muye-reader-content, .reader-content, h1.muye-reader-title, h1"))
+            is_scrolling = bool(sel_cfg.get("chapter_is_scrolling", False))
 
+            soup = self._get_soup(chapter_url, wait_css=wait_css, is_scrolling=is_scrolling)
             if not soup:
                 return None
 
-            # 提取章节内容
             chapter_content = self._parse_chapter_content(soup)
-
-            # 提取发布日期
             publish_date = self._extract_publish_date_from_chapter(soup)
 
-            # 计算字数
             word_count = 0
             if chapter_content:
-                # 去除空白字符后计算中文字符数
-                clean_content = re.sub(r'\s+', '', chapter_content)
-                # 统计中文字符（包括中文标点）
-                chinese_chars = re.findall(r'[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]', clean_content)
+                clean_content = re.sub(r"\s+", "", chapter_content)
+                chinese_chars = re.findall(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]", clean_content)
                 word_count = len(chinese_chars)
 
-            # 提取章节标题
             chapter_title = ""
-            # 优先选择 muye_reader_title（章节标题）
-            for elem in soup.select(
-                    'h1.muye-reader-title, .muye-reader-box-header .muye-reader-title, .muye-reader-title'):
-                if not elem:
+            for elem in soup.select("h1.muye-reader-title, .muye-reader-box-header .muye-reader-title, .muye-reader-title, h1"):
+                if elem.find_parent(class_="muye-reader-nav") is not None:
                     continue
-                # 确保不是导航栏里的标题
-                if elem.find_parent(class_='muye-reader-nav') is not None:
-                    continue
-                chapter_title = self._decrypt_text(elem.get_text(strip=True))
+                chapter_title = self._decrypt_text(elem.get_text(strip=True)).strip()
                 if chapter_title:
                     break
 
             return {
-                'content': chapter_content,
-                'title': chapter_title,
-                'publish_date': publish_date,
-                'word_count': word_count,
-                'url': chapter_url
+                "content": chapter_content,
+                "title": chapter_title,
+                "publish_date": publish_date or "",
+                "word_count": int(word_count),
+                "url": chapter_url,
             }
 
         except Exception as e:
-            self.logger.error(f'获取章节内容失败 {chapter_url}: {e}')
+            self.logger.error(f"获取章节内容失败 {chapter_url}: {e}")
             return None
 
-
+    # ------------------------------------------------------------------
+    # BaseSpider API: fetch_first_n_chapters (智能增量)
+    # ------------------------------------------------------------------
     def fetch_first_n_chapters(self, novel_url: str, target_chapter_count: int = 5) -> List[Dict[str, Any]]:
-        """获取小说前N章内容（智能补全：只获取缺失的章节）
-
-        Args:
-            novel_url: 小说详情页URL
-            target_chapter_count: 目标抓取章节数（默认=5；若为0/None则使用配置中的 chapter_extraction_goal）
-
-        Returns:
-            list: 章节内容列表，每个元素包含章节信息
-        """
-        # 目标章节数兜底
         if not target_chapter_count or int(target_chapter_count) <= 0:
             target_chapter_count = int(self.site_config.get("chapter_extraction_goal", 5))
 
         novel_id = self._extract_novel_id_from_url(novel_url)
-        self.logger.info(
-            f"[章节获取] 开始获取小说章节内容: {novel_url} (小说ID: {novel_id}, 目标章节数: {target_chapter_count})"
-        )
+        self.logger.info(f"[章节获取] 开始获取小说章节内容: {novel_url} (小说ID: {novel_id}, 目标章节数: {target_chapter_count})")
 
         if not novel_id:
             self.logger.warning("[章节获取] 无法从URL提取小说ID，跳过章节抓取")
             return []
 
         try:
-            # 1) DB：已有章节数
             existing_count = self._get_existing_chapter_count(novel_id)
 
-            # 2) 详情（尽量复用缓存；用于 publish_date 兜底 + 日志展示）
             detail = self.fetch_novel_detail(novel_url, novel_id, seed=None)
             display_title = detail.get("title") or f"小说ID:{novel_id}"
             publish_date = detail.get("publish_date", "")
 
-            # 3) 如果 DB 里已有足够章节：直接读 DB
             if existing_count >= target_chapter_count:
-                self.logger.info(
-                    f"[章节智能补全] 《{display_title}》 DB已有{existing_count}章 ≥ 目标{target_chapter_count}章，直接从数据库加载"
-                )
+                self.logger.info(f"[章节智能补全] 《{display_title}》 DB已有{existing_count}章 ≥ 目标{target_chapter_count}章，直接从数据库加载")
                 existing = self._get_existing_chapters(novel_id, target_chapter_count)
                 return self._format_existing_chapters(existing, target_chapter_count, publish_date=publish_date)
 
@@ -1093,135 +912,149 @@ class FanqieSpider(BaseSpider):
                 existing_chapters = self._get_existing_chapters(novel_id, existing_count)
 
             need_count = target_chapter_count - existing_count
-            self.logger.info(
-                f"[章节智能补全] 《{display_title}》 需要抓取{need_count}章（已有{existing_count}章，目标{target_chapter_count}章）"
-            )
+            self.logger.info(f"[章节智能补全] 《{display_title}》 需要抓取{need_count}章（已有{existing_count}章，目标{target_chapter_count}章）")
 
-            # 4) 目录页
+            # 目录页：你原来写的 wait_css="..." 会导致等待逻辑无意义甚至超时，这里改成可用 selector
             catalog_url = f"{novel_url}#Catalog" if "#" not in novel_url else novel_url
             self.logger.info(f"[章节智能补全] 《{display_title}》 访问目录页: {catalog_url}")
-            soup = self._get_soup(catalog_url, wait_css="...", is_scrolling=False)
+
+            sel_cfg = (self.site_config or {}).get("selenium_specific", {}) or {}
+            catalog_wait_css = sel_cfg.get(
+                "catalog_wait_css",
+                ".page-directory-content, .chapter-item, a[href*='/reader/'], .directory-list, .chapter-list"
+            )
+
+            soup = self._get_soup(catalog_url, wait_css=catalog_wait_css, is_scrolling=False)
             if not soup:
                 self.logger.warning(f"[章节智能补全] 《{display_title}》 无法访问目录页，返回已有章节")
-                return self._format_existing_chapters(existing_chapters, target_chapter_count,
-                                                      publish_date=publish_date)
+                return self._format_existing_chapters(existing_chapters, target_chapter_count, publish_date=publish_date)
 
-            # 5) 提取章节链接（至少提取 existing_count + need_count，才能正确跳过）
             chapter_infos = self._extract_chapter_links(
                 soup, novel_id, max_chapters=max(target_chapter_count, existing_count + need_count)
             )
             if not chapter_infos:
                 self.logger.warning(f"[章节智能补全] 《{display_title}》 未找到章节链接，返回已有章节")
-                return self._format_existing_chapters(existing_chapters, target_chapter_count,
-                                                      publish_date=publish_date)
+                return self._format_existing_chapters(existing_chapters, target_chapter_count, publish_date=publish_date)
 
-            # 6) 跳过已有章节（统一 slicing helper 在 BaseSpider）
             chapter_infos_to_fetch = self._slice_chapter_infos_to_fetch(chapter_infos, existing_count, need_count)
             if not chapter_infos_to_fetch:
                 self.logger.info(f"[章节智能补全] 《{display_title}》 无需抓取新章节（目录不足或need_count=0）")
-                return self._format_existing_chapters(existing_chapters, target_chapter_count,
-                                                      publish_date=publish_date)
+                return self._format_existing_chapters(existing_chapters, target_chapter_count, publish_date=publish_date)
 
-            # 7) 抓取新章节
             new_chapters: List[Dict[str, Any]] = []
-            for i, (chapter_title, chapter_url, first_post_time, word_count) in enumerate(chapter_infos_to_fetch, 1):
+            for i, (chapter_title, chapter_url, chapter_id, chapter_index) in enumerate(chapter_infos_to_fetch, 1):
                 chapter_num = existing_count + i
                 self.logger.info(f"[章节智能补全] 《{display_title}》 - 抓取第{chapter_num}章: {chapter_title}")
 
-                try:
-                    chapter_content = self._fetch_single_chapter(chapter_url)
-                    if not chapter_content:
-                        continue
-
-                    publish_date = first_post_time if first_post_time else publish_date
-                    new_chapters.append({
-                        "chapter_num": chapter_num,
-                        "chapter_title": chapter_title,
-                        "chapter_content": chapter_content,
-                        "chapter_url": chapter_url,
-                        "publish_date": publish_date,
-                        "word_count": int(word_count or 0),
-                    })
-                except Exception as e:
-                    self.logger.error(f"[章节智能补全] 获取章节失败 {chapter_title}: {e}")
+                chapter_data = self._fetch_single_chapter(chapter_url)
+                if not chapter_data:
                     continue
 
+                chapter_publish_date = (chapter_data.get("publish_date") or publish_date or "")
+                new_chapters.append({
+                    "chapter_num": chapter_num,
+                    "chapter_title": chapter_title or chapter_data.get("title", ""),
+                    "chapter_content": chapter_data.get("content", ""),
+                    "chapter_url": chapter_url,
+                    "publish_date": chapter_publish_date,
+                    "word_count": int(chapter_data.get("word_count") or 0),
+                    "platform_chapter_id": chapter_id,
+                    "chapter_index": int(chapter_index or chapter_num),
+                })
+
                 if i < len(chapter_infos_to_fetch):
-                    self._humanlike_sleep(2, 4)
+                    self._humanlike_sleep(1.0, 2.5)
 
             self.logger.info(f"[章节智能补全] 《{display_title}》 成功抓取 {len(new_chapters)} 章新章节")
-
-            # 8) 合并（统一 helper）
-            return self._merge_chapters(existing_chapters, new_chapters, target_chapter_count,
-                                        publish_date=publish_date)
+            return self._merge_chapters(existing_chapters, new_chapters, target_chapter_count, publish_date=publish_date)
 
         except Exception as e:
             self.logger.error(f"[章节获取] 获取小说章节内容失败 {novel_url}: {e}")
             return []
 
+    # ------------------------------------------------------------------
+    # Enrichment
+    # ------------------------------------------------------------------
     def enrich_rank_items(
-            self,
-            items: Sequence[Dict[str, Any]],
-            *,
-            max_books: int = 20,
-            fetch_detail: bool = True,
-            fetch_chapters: bool = False,
-            chapter_count: Optional[int] = None,
+        self,
+        items: Sequence[Dict[str, Any]],
+        *,
+        max_books: int = 20,
+        fetch_detail: bool = True,
+        fetch_chapters: bool = False,
+        chapter_count: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Enrich rank items with detail metadata and optional First_N_chapters."""
         if chapter_count is None:
             chapter_count = self.default_chapter_count
 
+        site_cfg = self.site_config or {}
+        rank_primary = site_cfg.get("rank_fields_primary") or []
+        detail_primary = site_cfg.get("detail_fields_primary") or []
+
+        if not rank_primary:
+            rank_primary = ["platform_novel_id", "title", "author", "intro", "reading_count", "status"]
+        if not detail_primary:
+            detail_primary = ["total_words", "main_category", "tags", "publish_date"]
+
         out: List[Dict[str, Any]] = []
-        for i, book in enumerate(items[:max_books], 1):
-            title = book.get('title', '未知')
+
+        for i, book in enumerate(list(items)[:max_books], 1):
+            title = book.get("title", "未知")
             self.logger.info(f"[数据补完] 处理第{i}/{min(len(items), max_books)}本书: 《{title}》")
+
             enriched = dict(book)
 
             if fetch_detail:
-                detail = self.fetch_novel_detail(enriched.get("url", ""), enriched.get("platform_novel_id", ""),
-                                                 seed=enriched)
+                detail = self.fetch_novel_detail(
+                    enriched.get("url", ""),
+                    enriched.get("platform_novel_id", ""),
+                    seed=enriched,
+                )
 
-                # 记录处理前的分类信息
-                original_main = enriched.get("main_category", "")
-                original_tags = enriched.get("tags", [])
-                self.logger.info(f"[数据补完] 《{title}》 原有分类 - 主分类: '{original_main}', 标签: {original_tags}")
+                for k, dv in detail.items():
+                    if dv is None:
+                        continue
+                    if k in ("platform", "platform_novel_id", "url", "rank", "rank_type", "fetch_date", "fetch_time"):
+                        continue
 
-                # 更新所有字段
-                update_fields = ["title", "author", "intro", "status", "total_words", "publish_date"]
-
-                for k in update_fields:
-                    dv = detail.get(k)
-                    if dv is not None:
-                        # 只在为空时才更新
-                        if k not in enriched or not enriched[k]:
+                    if k in rank_primary:
+                        if self._should_fill_when_empty(k, enriched.get(k)):
                             enriched[k] = dv
+                        continue
 
-                # 更新阅读数（使用详情页的，如果详情页有）
-                if detail.get("reading_count", 0) > 0:
-                    enriched["reading_count"] = detail["reading_count"]
+                    if k in detail_primary:
+                        if self._should_fill_when_empty(k, enriched.get(k)):
+                            enriched[k] = dv
+                        else:
+                            if k == "tags":
+                                existing = list(enriched.get("tags") or [])
+                                incoming = list(detail.get("tags") or [])
+                                merged = self._dedupe_keep_order(existing + incoming)
+                                main_cat = (enriched.get("main_category") or "").strip()
+                                if main_cat and main_cat in merged:
+                                    merged = [t for t in merged if t != main_cat]
+                                enriched["tags"] = merged
+                        continue
 
-                # 分类处理：优先使用详情页的分类，但避免用空值覆盖正确的分类
-                detail_main_cat = detail.get("main_category")
-                detail_tags = detail.get("tags", [])
+                    if self._should_fill_when_empty(k, enriched.get(k)):
+                        enriched[k] = dv
 
-                if detail_main_cat:
-                    self.logger.info(f"[数据补完] 使用详情页主分类: '{detail_main_cat}' (替换原有: '{original_main}')")
-                    enriched["main_category"] = detail_main_cat
-                else:
-                    self.logger.info(f"[数据补完] 保留原有主分类: '{original_main}'")
+                # tags list 强制规范化
+                tags_val = enriched.get("tags")
+                if tags_val is None:
+                    enriched["tags"] = []
+                elif not isinstance(tags_val, list):
+                    enriched["tags"] = list(tags_val) if isinstance(tags_val, (set, tuple)) else [str(tags_val)]
+                enriched["tags"] = self._dedupe_keep_order(enriched.get("tags") or [])
 
-                # 合并标签
-                existing_tags = set(enriched.get("tags", []))
-                new_tags = set(detail.get("tags", []))
-                merged_tags = list(existing_tags.union(new_tags))
+                main_cat = (enriched.get("main_category") or "").strip()
+                if main_cat and main_cat in enriched["tags"]:
+                    enriched["tags"] = [t for t in enriched["tags"] if t != main_cat]
 
-                if merged_tags != original_tags:
-                    self.logger.info(f"[数据补完] 合并标签: {original_tags} + {list(new_tags)} = {merged_tags}")
-                enriched["tags"] = merged_tags
-
-                self.logger.info(
-                    f"[数据补完] 《{title}》 最终分类 - 主分类: '{enriched.get('main_category')}', 标签: {enriched.get('tags', [])}")
+                # reading_count：rank 主来源；只在缺失时用 detail 值兜底
+                if self._should_fill_when_empty("reading_count", enriched.get("reading_count")):
+                    if int(detail.get("reading_count") or 0) > 0:
+                        enriched["reading_count"] = int(detail["reading_count"])
 
             if fetch_chapters:
                 chapters = self.fetch_first_n_chapters(enriched.get("url", ""), target_chapter_count=chapter_count)
@@ -1230,15 +1063,11 @@ class FanqieSpider(BaseSpider):
                     self.logger.info(f"[数据补完] 《{title}》 获取到 {len(chapters)} 章内容")
 
             out.append(enriched)
-            self._humanlike_sleep(1, 3)
+            self._humanlike_sleep(0.8, 1.8)
 
         return out
 
-    # ------------------------------------------------------------------
-    # BaseSpider API: enrich_books_with_details
-    # ------------------------------------------------------------------
     def enrich_books_with_details(self, books, max_books: int = 20):
-        """Enrich rank books with detail-page metadata."""
         return self.enrich_rank_items(
             books,
             max_books=max_books,
@@ -1248,28 +1077,17 @@ class FanqieSpider(BaseSpider):
         )
 
     # ------------------------------------------------------------------
-    # Database Operations
+    # Database: snapshot + one-stop pipeline
     # ------------------------------------------------------------------
     def save_rank_snapshot(
-            self,
-            *,
-            rank_type: str,
-            items: Sequence[Dict[str, Any]],
-            snapshot_date: Optional[str] = None,
-            source_url: str = "",
-            make_title_primary: bool = True,
+        self,
+        *,
+        rank_type: str,
+        items: Sequence[Dict[str, Any]],
+        snapshot_date: Optional[str] = None,
+        source_url: str = "",
+        make_title_primary: bool = True,
     ) -> Optional[int]:
-        """Persist a rank snapshot via db_handler if available.
-
-        Args:
-            rank_type: key in rank_urls and rank_type_map.
-            items: enriched or raw items list.
-            snapshot_date: YYYY-MM-DD; defaults to today.
-            source_url: optional rank page url.
-
-        Returns:
-            snapshot_id (int) if db_handler returns it; otherwise None.
-        """
         if not self.db_handler or not hasattr(self.db_handler, "save_rank_snapshot"):
             self.logger.warning("db_handler missing or lacks save_rank_snapshot; skip saving.")
             return None
@@ -1288,17 +1106,16 @@ class FanqieSpider(BaseSpider):
         )
 
     def fetch_and_save_rank(
-            self,
-            rank_type: str,
-            *,
-            pages: Optional[int] = None,
-            enrich_detail: bool = True,
-            enrich_chapters: bool = False,
-            chapter_count: Optional[int] = None,
-            snapshot_date: Optional[str] = None,
-            max_books: int = 200,
+        self,
+        rank_type: str,
+        *,
+        pages: Optional[int] = None,
+        enrich_detail: bool = True,
+        enrich_chapters: bool = False,
+        chapter_count: Optional[int] = None,
+        snapshot_date: Optional[str] = None,
+        max_books: int = 200,
     ) -> Dict[str, Any]:
-        """One-stop pipeline: fetch rank -> enrich -> save (optional)."""
         if pages is not None:
             self.site_config["pages_per_rank"] = pages
 
@@ -1328,22 +1145,37 @@ class FanqieSpider(BaseSpider):
                 if not chapters:
                     continue
 
-                # 调试：检查章节发布时间（只打印前N章，避免日志过长）
-                max_log_chapters = int(self.site_config.get("max_log_chapters", 5))
-                self.logger.info(f"准备保存小说 {b.get('title')} 的章节（仅展示前{max_log_chapters}章发布时间）")
-                for i, chapter in enumerate(chapters[:max_log_chapters], 1):
-                    publish_date = chapter.get('publish_date', '')
-                    self.logger.info(f"[章节发布时间验证] 章节{i}发布时间: {publish_date}")
+                normalized: List[Dict[str, Any]] = []
+                for ch in chapters:
+                    content = ch.get("chapter_content") or ch.get("content") or ""
+                    title = ch.get("chapter_title") or ch.get("title") or ""
+                    url = ch.get("chapter_url") or ch.get("url") or ""
+                    num = ch.get("chapter_num") or ch.get("chapter_index") or 0
+                    wc = ch.get("word_count") or 0
+                    pd = ch.get("publish_date") or ""
 
-                first_chapter_publish_date = ""
-                if chapters:
-                    first_chapter_publish_date = chapters[0].get('publish_date', snapshot_date or self._today_str())
+                    normalized.append({
+                        "chapter_num": int(num) if str(num).isdigit() else 0,
+                        "chapter_title": str(title),
+                        "chapter_content": str(content),
+                        "chapter_url": str(url),
+                        "publish_date": str(pd),
+                        "word_count": int(wc) if str(wc).replace(".", "", 1).isdigit() else 0,
+                        "platform_chapter_id": ch.get("platform_chapter_id", "") or ch.get("chapter_id", ""),
+                        "chapter_index": ch.get("chapter_index", 0),
+                    })
+
+                first_chapter_publish_date = (
+                    (normalized[0].get("publish_date") or "").strip()
+                    or (b.get("publish_date") or "").strip()
+                    or (snapshot_date or self._today_str())
+                )
 
                 self.db_handler.upsert_first_n_chapters(
                     platform="fanqie",
                     platform_novel_id=b.get("platform_novel_id", ""),
                     publish_date=first_chapter_publish_date,
-                    chapters=chapters,
+                    chapters=normalized,
                     novel_fallback_fields={
                         "title": b.get("title", ""),
                         "author": b.get("author", ""),
@@ -1364,18 +1196,50 @@ class FanqieSpider(BaseSpider):
             "items": enriched,
         }
 
-    # ------------------------------------------------------------------
-    # BaseSpider API: fetch_whole_ranks, 一键启动
-    # ------------------------------------------------------------------
-    def fetch_whole_rank(self) -> List[Dict[str, Any]]:
-        """Fetch all configured rank lists and return a flattened list of items."""
+    def fetch_whole_rank(
+        self,
+        *,
+        pages: Optional[int] = None,
+        enrich_detail: bool = True,
+        enrich_chapters: bool = False,
+        chapter_count: Optional[int] = None,
+        snapshot_date: Optional[str] = None,
+        max_books: int = 200,
+    ) -> List[Dict[str, Any]]:
         all_books: List[Dict[str, Any]] = []
-        for rank_type in (self.site_config.get("rank_urls") or {}):
+
+        rank_urls = (self.site_config.get("rank_urls") or {})
+        if not rank_urls:
+            self.logger.warning("site_config.rank_urls is empty; nothing to fetch.")
+            return all_books
+
+        for rank_type in rank_urls:
             try:
-                books = self.fetch_rank_list(rank_type)
-                all_books.extend(books)
+                self.logger.info(f"[一键启动] 开始处理榜单: {rank_type}")
+
+                result = self.fetch_and_save_rank(
+                    rank_type=rank_type,
+                    pages=pages,
+                    enrich_detail=enrich_detail,
+                    enrich_chapters=enrich_chapters,
+                    chapter_count=chapter_count,
+                    snapshot_date=snapshot_date,
+                    max_books=max_books,
+                )
+
+                items = result.get("items") or []
+                all_books.extend(items)
+
                 if hasattr(self, "_save_raw_data"):
-                    self._save_raw_data(books, f"{self.name}_{rank_type}_{time.strftime('%Y%m%d')}.json")
+                    try:
+                        fname = f"{self.name}_{rank_type}_{time.strftime('%Y%m%d')}.json"
+                        self._save_raw_data(items, fname)
+                    except Exception:
+                        pass
+
+                self._humanlike_sleep(0.8, 1.8)
+
             except Exception as e:
-                self.logger.error(f"抓取{rank_type}榜失败: {e}")
+                self.logger.error(f"[一键启动] 处理榜单 {rank_type} 失败: {e}")
+
         return all_books

@@ -129,7 +129,7 @@ WEBSITES = {
             "搞笑吐槽": "轻小说",
             "恋爱日常": "轻小说",
         },
-        'pages_per_rank': 1,
+        'pages_per_rank': 5,
         'chapter_extraction_goal': 5,
         'max_log_chapters': 5,
         'selenium_specific': {
@@ -158,49 +158,79 @@ WEBSITES = {
             "main_category": {"when_unknown": True,},
             "tags": {"when_empty": True,},
         },
-
-
     },
 
     'fanqie': {
         'name': '番茄小说',
         'rank_urls': {
-            'read_western_fantasy': 'https://fanqienovel.com/rank/1_2_1141',    # 阅读榜·西方奇幻
-            'read_scifi_apocalypse': 'https://fanqienovel.com/rank/1_2_8',      # 阅读榜·科幻末世
-            'read_urban_highmartial': 'https://fanqienovel.com/rank/1_2_1014',  # 阅读榜·都市高武
-            'read_suspense_brainhole': 'https://fanqienovel.com/rank/1_2_539',  # 阅读榜·悬疑脑洞
-            'read_urban_brainhole': 'https://fanqienovel.com/rank/1_2_262',     # 阅读榜·都市脑洞
-            'read_anime': 'https://fanqienovel.com/rank/1_2_718',               # 阅读榜·动漫衍生
-            'new_western_fantasy': 'https://fanqienovel.com/rank/1_1_1141',     # 新书榜·西方奇幻
-            'new_scifi_apocalypse': 'https://fanqienovel.com/rank/1_1_8',       # 新书榜·科幻末世
-            'new_urban_highmartial': 'https://fanqienovel.com/rank/1_1_1014',   # 新书榜·都市高武
-            'new_suspense_brainhole': 'https://fanqienovel.com/rank/1_1_539',   # 新书榜·悬疑脑洞
-            'new_urban_brainhole': 'https://fanqienovel.com/rank/1_1_262',      # 新书榜·都市脑洞
-            'new_anime': 'https://fanqienovel.com/rank/1_1_718',                # 新书榜·动漫衍生
+            '阅读榜西方奇幻': 'https://fanqienovel.com/rank/1_2_1141',     # 阅读榜西方奇幻
+            '阅读榜科幻末世': 'https://fanqienovel.com/rank/1_2_8',        # 阅读榜科幻末世
+            '阅读榜都市高武': 'https://fanqienovel.com/rank/1_2_1014',     # 阅读榜都市高武
+            '阅读榜悬疑脑洞': 'https://fanqienovel.com/rank/1_2_539',      # 阅读榜悬疑脑洞
+            '阅读榜都市脑洞': 'https://fanqienovel.com/rank/1_2_262',      # 阅读榜都市脑洞
+            '阅读榜动漫衍生': 'https://fanqienovel.com/rank/1_2_718',      # 阅读榜动漫衍生
+            '新书榜西方奇幻': 'https://fanqienovel.com/rank/1_1_1141',     # 新书榜西方奇幻
+            '新书榜科幻末世': 'https://fanqienovel.com/rank/1_1_8',        # 新书榜科幻末世
+            '新书榜都市高武': 'https://fanqienovel.com/rank/1_1_1014',     # 新书榜都市高武
+            '新书榜悬疑脑洞': 'https://fanqienovel.com/rank/1_1_539',      # 新书榜悬疑脑洞
+            '新书榜都市脑洞': 'https://fanqienovel.com/rank/1_1_262',      # 新书榜都市脑洞
+            '新书榜动漫衍生': 'https://fanqienovel.com/rank/1_1_718',      # 新书榜动漫衍生
         },
         "rank_type_map": {
-            "read_western_fantasy": {"rank_family": "阅读榜", "rank_sub_cat": "西方奇幻"},
-            "read_scifi_apocalypse": {"rank_family": "阅读榜", "rank_sub_cat": "科幻末世"},
-            "read_urban_highmartial": {"rank_family": "阅读榜", "rank_sub_cat": "都市高武"},
-            "read_suspense_brainhole": {"rank_family": "阅读榜", "rank_sub_cat": "悬疑脑洞"},
-            "read_urban_brainhole": {"rank_family": "阅读榜", "rank_sub_cat": "都市脑洞"},
-            "read_anime": {"rank_family": "阅读榜", "rank_sub_cat": "动漫衍生"},
-            "new_western_fantasy": {"rank_family": "新书榜", "rank_sub_cat": "西方奇幻"},
-            "new_scifi_apocalypse": {"rank_family": "新书榜", "rank_sub_cat": "科幻末世"},
-            "new_urban_highmartial": {"rank_family": "新书榜", "rank_sub_cat": "都市高武"},
-            "new_suspense_brainhole": {"rank_family": "新书榜", "rank_sub_cat": "悬疑脑洞"},
-            "new_urban_brainhole": {"rank_family": "新书榜", "rank_sub_cat": "都市脑洞"},
-            "new_anime": {"rank_family": "新书榜", "rank_sub_cat": "动漫衍生"},
+            "阅读榜西方奇幻": {"rank_family": "阅读榜", "rank_sub_cat": "西方奇幻"},
+            "阅读榜科幻末世": {"rank_family": "阅读榜", "rank_sub_cat": "科幻末世"},
+            "阅读榜都市高武": {"rank_family": "阅读榜", "rank_sub_cat": "都市高武"},
+            "阅读榜悬疑脑洞": {"rank_family": "阅读榜", "rank_sub_cat": "悬疑脑洞"},
+            "阅读榜都市脑洞": {"rank_family": "阅读榜", "rank_sub_cat": "都市脑洞"},
+            "阅读榜动漫衍生": {"rank_family": "阅读榜", "rank_sub_cat": "动漫衍生"},
+            "新书榜西方奇幻": {"rank_family": "新书榜", "rank_sub_cat": "西方奇幻"},
+            "新书榜科幻末世": {"rank_family": "新书榜", "rank_sub_cat": "科幻末世"},
+            "新书榜都市高武": {"rank_family": "新书榜", "rank_sub_cat": "都市高武"},
+            "新书榜悬疑脑洞": {"rank_family": "新书榜", "rank_sub_cat": "悬疑脑洞"},
+            "新书榜都市脑洞": {"rank_family": "新书榜", "rank_sub_cat": "都市脑洞"},
+            "新书榜动漫衍生": {"rank_family": "新书榜", "rank_sub_cat": "动漫衍生"},
         },
         'base_url': 'https://fanqienovel.com',
+        'chapter_extraction_goal': 5,
+        'pages_per_rank': 1,
         'selenium_specific': {
             'method': 'scroll_load',   # 滚动加载方式
             'target_count': 30,        # 目标加载数量
             'scroll_delay': 2,         # 滚动延迟
             'max_scroll_attempts': 10, # 最大滚动尝试次数
+            "wait_css": ".rank-book-item, .book-item, a[href*='/page/'], a[href*='/book/']",
+            # detail 页单独的 wait_css
+            "detail_wait_css": ".info-label, .info-count-item, meta[property='og:title'], h1",
+            # detail 页是否滚动（默认不滚）
+            "detail_is_scrolling": False,
+            "chapter_wait_css": ".muye-reader-content, .reader-content, h1.muye-reader-title, h1",
+            "chapter_is_scrolling": False,
         },
-        'chapter_extraction_goal': 5,
-        'pages_per_rank': 1,
+        # Fanqie Rank 页主来源字段
+        "rank_fields_primary": [
+            "platform_novel_id",
+            "title",
+            "author",
+            "intro",
+            "reading_count",
+            "status",
+            "total_words",
+        ],
+        # Fanqie Detail 页主来源字段
+        "detail_fields_primary": [
+            "main_category",
+            "tags",
+        ],
+        # Detail 页 fallback 触发规则（Fanqie rank 页通常缺分类/标签）
+        "detail_fallback_rules": {
+            "title": {"when_empty": True},
+            "author": {"when_empty": True},
+            "intro": {"when_empty": True},
+            "main_category": {"when_empty": True},
+            "tags": {"when_empty": True},
+            "status": {"when_empty": True},
+            "total_words": {"when_zero": True},
+        },
     }
 }
 

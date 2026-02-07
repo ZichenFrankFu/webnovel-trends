@@ -22,7 +22,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from bs4 import BeautifulSoup
-from selenium import webdriver
 import config
 from .base_spider import BaseSpider
 
@@ -40,8 +39,8 @@ class QidianSpider(BaseSpider):
     """
     功能：
     1) 抓取榜单页（可多页，获取榜上书籍信息：排名/书名/分类/作者等信息）
-    2) 抓取详情页（补全元信息：分类/状态/字数/简介等）
-    3) 抓取前 N 章免费章节
+    2) 抓取详情页（补全：分类/状态/字数/简介等）
+    3) 抓取前 N 章免费章节（智能：只抓数据库缺失的）
     4) 将抓取到的数据写入数据库
     """
 
@@ -50,15 +49,15 @@ class QidianSpider(BaseSpider):
         """
         Args:
             site_config: 站点配置字典，关键字段：
-            - base_url: str
-            - rank_urls: dict[str, str] (url模板支持{page})
-            - pages_per_rank: int
-            - chapter_extraction_goal: int
-            - selenium_specific: 可选的selenium覆盖配置
-            - max_retries: 最大重试次数，默认3
-        db_handler: 数据库处理器，负责将抓取到的内容持久化，加入数据库
-            - save_rank_snapshot(...)
-            - upsert_first_n_chapters(...)
+                - base_url: str
+                - rank_urls: dict[str, str] (url模板支持{page})
+                - pages_per_rank: int
+                - chapter_extraction_goal: int
+                - selenium_specific: 可选的selenium覆盖配置
+                - max_retries: 最大重试次数，默认3
+            db_handler: 数据库处理器，负责将抓取到的内容持久化，加入数据库
+                - save_rank_snapshot(...)
+                - upsert_first_n_chapters(...)
         """
         root_cfg = (getattr(config, "WEBSITES", {}) or {}).get("qidian", {}) or {}
         merged_cfg = self._deep_merge_dict(root_cfg, site_config or {})
@@ -249,58 +248,6 @@ class QidianSpider(BaseSpider):
                 self.logger.warning(f"[分类解析] 无法识别的分类: '{raw}'")
                 return "未知", raw if raw else None
 
-    """从数据库novel_titles表中获取normalized标题(title_norm)"""
-    def _get_novel_title_norm_from_db(self, novel_id: str) -> Optional[str]:
-        if not self.db_handler:
-            return None
-
-        try:
-            # 使用db_handler的get_novel_title_norm方法
-            if hasattr(self.db_handler, 'get_novel_title_norm'):
-                title_norm = self.db_handler.get_novel_title_norm("qidian", novel_id)
-                if title_norm:
-                    self.logger.debug("[标题查询] 从数据库获取到归一化标题: %s (小说ID: %s)", title_norm, novel_id)
-                else:
-                    self.logger.debug("[标题查询] 数据库中未找到归一化标题 (小说ID: %s)", novel_id)
-                return title_norm
-            else:
-                self.logger.warning("[标题查询] db_handler没有get_novel_title_norm方法")
-                return None
-
-        except Exception as e:
-            self.logger.debug("[标题查询] 获取归一化标题失败 (小说ID: %s): %s", novel_id, e)
-
-        return None
-
-    """获取用于显示的标题，优先使用normalized标题"""
-    def _get_display_title(self, novel_id: str, fallback_title: str = "") -> Tuple[str, str]:
-        """
-        Args:
-            novel_id: 小说平台ID
-            fallback_title: 后备标题（当无法从数据库获取时使用）
-
-        Returns:
-            Tuple[显示标题, 标题来源]
-        """
-        # 首先尝试从数据库获取归一化标题
-        title_norm = self._get_novel_title_norm_from_db(novel_id)
-
-        if title_norm:
-            return title_norm, "norm标题"
-        elif fallback_title:
-            return fallback_title, "fallback标题"
-        else:
-            # 如果都没有，尝试从数据库中查询
-            try:
-                if self.db_handler and hasattr(self.db_handler, 'get_novel_title'):
-                    title = self.db_handler.get_novel_title("qidian", novel_id)
-                    if title:
-                        return title, "数据库标题"
-            except Exception as e:
-                self.logger.debug("[标题显示] 获取数据库标题失败: %s", e)
-
-            return f"小说ID:{novel_id}", "ID"
-
     """从起点的小说url中获取起点的uid"""
     def _extract_novel_id_from_url(self, url: str) -> str:
         patterns = [
@@ -353,7 +300,7 @@ class QidianSpider(BaseSpider):
             self.logger.warning(f"从 config 获取 rank_type_map 失败: {e}")
 
     # ------------------------------------------------------------------
-    # Rank Page Parsing -> novel_id, category, tag
+    # Rank Page Parsing -> novel_id, category, tag, title, author, intro
     # ------------------------------------------------------------------
     """Parse Rank Page soup into raw rank items"""
     def _parse_rank_page(self, soup: BeautifulSoup, *, rank_type: str, page: int) -> List[Dict[str, Any]]:
@@ -543,7 +490,7 @@ class QidianSpider(BaseSpider):
         return all_items
 
     # ------------------------------------------------------------------
-    # Detail Page -> title, author, intro, status, total_recommend
+    # Detail Page -> status, total_words, total_recommend
     # ------------------------------------------------------------------
     """从 Detail Page soup中获取书名，作者，和简介并填充输入db的dict"""
     def _fill_detail_title_author_intro(self, soup: BeautifulSoup, detail: Dict[str, Any]) -> None:
@@ -716,7 +663,7 @@ class QidianSpider(BaseSpider):
             self.logger.error(traceback.format_exc())
             return "未知"
 
-    """Detail Pagesoup提取主分类和副分类并填充并填充输入db的dict"""
+    """Detail Page soup提取主分类和副分类并填充并填充输入db的dict"""
     def _fill_detail_category_tags(self, soup: BeautifulSoup, detail: Dict[str, Any]) -> None:
         # 如果已经有主分类且不是"未知"，则跳过详情页分类提取
         current_main = detail.get("main_category", "")
@@ -763,7 +710,7 @@ class QidianSpider(BaseSpider):
         detail["tags"] = self._dedupe_keep_order(tags)
         self.logger.info(f"[分类处理] 最终结果 - main='{detail['main_category']}', tags={tags} (新增{tag_count}个标签)")
 
-    """详情页soup提取是否完结并填充并填充输入db的dict"""
+    """从 Detail Page soup中提取是否完结并填充并填充输入db的dict"""
     def _fill_detail_status_words(self, soup: BeautifulSoup, detail: Dict[str, Any], page_url: str = "") -> None:
         """Fill normalized status (ongoing/completed) and total_words from detail page."""
         if page_url:
@@ -839,7 +786,7 @@ class QidianSpider(BaseSpider):
         except Exception as e:
             self.logger.error(f"Error extracting status and word count from page: {e}")
 
-    """详情页soup提取总推荐数并填充并填充输入db的dict"""
+    """从 Detail Page soup中提取总推荐数并填充并填充输入db的dict"""
     def _fill_total_recommend(self, soup: BeautifulSoup, detail: Dict[str, Any], page_url: str = "") -> None:
         """从详情页提取总推荐数 - 针对起点详情页特定结构，只获取总推荐"""
         if page_url:
@@ -1135,7 +1082,7 @@ class QidianSpider(BaseSpider):
     # ------------------------------------------------------------------
     # Chapter Page -> FIRST_N_CHAPTERS, each w/ content, word count, publish date
     # ------------------------------------------------------------------
-    """从Detail Page提取章节链接"""
+    """从 Detail Page soup中提取章节链接"""
     def _extract_chapter_links(self, soup: BeautifulSoup, book_id: str) -> List[Tuple[str, str, str, int]]:
         chapter_links = []
         try:
@@ -1636,7 +1583,6 @@ class QidianSpider(BaseSpider):
             self.logger.error("[章节抓取] 获取《%s》的章节内容失败 %s: %s", display_title, chapter_url, e)
             return None
 
-
     """抓取单章正文，并尽可能从同一章节页中解析发布时间"""
     def _fetch_single_chapter_with_meta(self, chapter_url: str, *, display_title: str = "") -> Tuple[Optional[str], str]:
         """
@@ -1747,7 +1693,9 @@ class QidianSpider(BaseSpider):
             self.logger.error(f'获取章节列表失败: {e}')
             return []
 
-    """智能获取小说前N章内容:只抓取缺失的章节"""
+    # ------------------------------------------------------------------
+    # BaseSpider API: fetch_first_n_chapters, 智能获取小说前N章内容:只抓取缺失的章节
+    # ------------------------------------------------------------------
     def fetch_first_n_chapters(self, novel_url: str, target_chapter_count: int = 5, *, fallback_title: str = "") -> List[Dict[str, Any]]:
         # 使用辅助方法获取显示用标题
         novel_id = self._extract_novel_id_from_url(novel_url)
@@ -1970,10 +1918,6 @@ class QidianSpider(BaseSpider):
                     enriched.get("platform_novel_id", ""),
                     seed=enriched,
                 )
-
-                # 更新所有字段，包括总推荐数
-                update_fields = ["title", "author", "intro", "status", "total_words",
-                                 "total_recommend", "publish_date"]
 
                 # -----------------------------
                 # 1) Detail 主字段：永远更新

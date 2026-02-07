@@ -553,10 +553,6 @@ class BaseSpider(ABC):
     # ------------------------------------------------------------------
     # Common Utils
     # ------------------------------------------------------------------
-    def _today_str(self) -> str:
-        """获取今日日期字符串 (YYYY-MM-DD)"""
-        return date.today().strftime("%Y-%m-%d")
-
     @staticmethod
     def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -569,6 +565,10 @@ class BaseSpider(ABC):
             else:
                 out[k] = v
         return out
+
+    def _today_str(self) -> str:
+        """获取今日日期字符串 (YYYY-MM-DD)"""
+        return date.today().strftime("%Y-%m-%d")
 
     def _to_abs_url(self, href: str) -> str:
         """将相对URL转换为绝对URL"""
@@ -712,6 +712,53 @@ class BaseSpider(ABC):
                 f.write(str(data))
 
         self.logger.debug(f"Raw data saved: {filepath}")
+
+    """获取用于显示的标题，优先使用normalized标题"""
+    def _get_display_title(self, novel_id: str, fallback_title: str = "", platform: str = "") -> Tuple[str, str]:
+        """
+        Args:
+            novel_id: 小说平台ID
+            fallback_title: 后备标题（当无法从数据库获取时使用）
+
+        Returns:
+            Tuple[显示标题, 标题来源]
+        """
+        # 首先尝试从数据库获取归一化标题
+        if not self.db_handler:
+            return None
+
+        title_norm = ""
+
+        try:
+            # 使用db_handler的get_novel_title_norm方法
+            if hasattr(self.db_handler, 'get_novel_title_norm'):
+                title_norm = self.db_handler.get_novel_title_norm(platform, novel_id)
+                if title_norm:
+                    self.logger.debug("[标题查询] 从数据库获取到归一化标题: %s (小说ID: %s)", title_norm, novel_id)
+                else:
+                    self.logger.debug("[标题查询] 数据库中未找到归一化标题 (小说ID: %s)", novel_id)
+            else:
+                self.logger.warning("[标题查询] db_handler没有get_novel_title_norm方法")
+                return None
+
+        except Exception as e:
+            self.logger.debug("[标题查询] 获取归一化标题失败 (小说ID: %s): %s", novel_id, e)
+
+        if title_norm:
+            return title_norm, "norm标题"
+        elif fallback_title:
+            return fallback_title, "fallback标题"
+        else:
+            # 如果都没有，尝试从数据库中查询
+            try:
+                if self.db_handler and hasattr(self.db_handler, 'get_novel_title'):
+                    title = self.db_handler.get_novel_title(platform, novel_id)
+                    if title:
+                        return title, "数据库标题"
+            except Exception as e:
+                self.logger.debug("[标题显示] 获取数据库标题失败: %s", e)
+
+            return f"小说ID:{novel_id}", "ID"
 
     """获取数据库中已有章节数量"""
     def _get_existing_chapter_count(self, novel_id: str) -> int:
