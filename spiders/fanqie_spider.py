@@ -27,23 +27,17 @@ class RankIdentity:
     rank_family: str
     rank_sub_cat: str = ""      # 番茄小说没有子分类
 
-
+"""番茄小说 Selenium 爬虫"""
 class FanqieSpider(BaseSpider):
-    """番茄小说爬虫
-
-    该 Spider 主要负责：
-    1) 抓取榜单页（可多页）
-    2) 抓取详情页（补全元信息：分类/状态/字数/简介等）
-    3) 可选抓取前 N 章（FIRST_N_CHAPTERS）
-    4) 输出"可直接落库"的标准化结构；如注入 db_handler 可直接写入数据库
-
-    重要接口（BaseSpider 抽象方法要求）：
-    - fetch_rank_list
-    - fetch_novel_detail
-    - enrich_books_with_details
-    - fetch_whole_rank
     """
-    """番茄小说 Selenium 爬虫"""
+    功能：
+    1) 抓取榜单页（按照番茄的格式每个榜单仅1页，获取榜上书籍信息：排名/书名/分类/作者等信息）
+    2) 抓取详情页（补全元信息：分类/状态/字数/简介等）
+    3) 抓取前 N 章免费章节
+    4) 将抓取到的数据写入数据库
+    """
+
+    """初始化番茄爬虫"""
     def __init__(self, site_config: Dict[str, Any], db_handler: Any = None):
         """
         Args:
