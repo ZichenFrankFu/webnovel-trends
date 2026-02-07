@@ -17,6 +17,35 @@ if project_root not in sys.path:
 from config import WEBSITES
 
 
+def _get_qidian_site_cfg() -> Dict[str, Any]:
+    """Return qidian site config from config.WEBSITES with safe fallbacks."""
+    try:
+        cfg = WEBSITES.get("qidian", {}) or {}
+        return dict(cfg)  # shallow copy to avoid accidental mutation
+    except Exception:
+        return {}
+
+def _get_rank_choices() -> list:
+    """Rank key choices driven by config; fallback to legacy keys."""
+    cfg = _get_qidian_site_cfg()
+    rank_urls = cfg.get("rank_urls") or {}
+    if isinstance(rank_urls, dict) and rank_urls:
+        return list(rank_urls.keys())
+    return ["hotsales", "yuepiao", "recom", "collect", "newbook"]
+
+def _default_rank_key(choices: list) -> str:
+    if "hotsales" in choices:
+        return "hotsales"
+    return choices[0] if choices else "hotsales"
+
+def _default_rank_keys_csv(choices: list) -> str:
+    prefer = ["hotsales", "yuepiao", "recom", "collect"]
+    picked = [k for k in prefer if k in choices]
+    if not picked and choices:
+        picked = choices[:4]
+    return ",".join(picked) if picked else ",".join(prefer)
+
+
 # ------------------------------------------------------------------
 # 测试前准备
 # ------------------------------------------------------------------
@@ -373,7 +402,7 @@ def _test_fetch_first_n_chapters(spider, db, novel_url=None, novel_id=None, chap
 
     try:
         print(f"开始抓取前{chapter_n}章内容...")
-        chapters = spider.fetch_first_n_chapters(novel_url, n=chapter_n)
+        chapters = spider.fetch_first_n_chapters(novel_url, target_chapter_count=chapter_n)
         print(f"成功抓取了 {len(chapters)} 章内容")
 
         if chapters:
@@ -1303,7 +1332,7 @@ def run_custom_test(args):
     if not rank_keys:  # 如果为空，使用默认值
         rank_keys = ["hotsales", "yuepiao", "recom", "collect"]
 
-    print(f"解析到的rank_keys: {rank_keys}")  # 添加调试信息
+    print(f"解析到的rank_keys: {rank_keys}")
 
     if args.test == 'quick':
         run_quick_test()
@@ -1316,7 +1345,7 @@ def run_custom_test(args):
             fetch_chapters=args.fetch_chapters,
             chapter_n=args.chapter_n,
             rank_key=args.rank_key,
-            rank_keys=rank_keys,  # 传递处理后的列表
+            rank_keys=rank_keys,
             max_books_per_test=args.max_books,
             verbose=args.verbose,
         )
@@ -1335,8 +1364,8 @@ if __name__ == "__main__":
                         help="要运行的测试用例")
 
     # 测试参数
-    parser.add_argument("--pages", type=int, default=1,
-                        help="抓取榜单页数 (默认: 1)")
+    parser.add_argument("--pages", type=int, default=_get_qidian_site_cfg().get("pages_per_rank", 1),
+                        help="抓取榜单页数 (默认: config.WEBSITES[qidian].pages_per_rank 或 1)")
     parser.add_argument("--top_n", type=int, default=3,
                         help="测试书籍数量 (默认: 3)")
     parser.add_argument("--fetch_detail", action="store_true", default=True,
@@ -1345,13 +1374,15 @@ if __name__ == "__main__":
                         help="不获取详情")
     parser.add_argument("--fetch_chapters", action="store_true",
                         help="是否抓取章节 (默认: 否)")
-    parser.add_argument("--chapter_n", type=int, default=3,
-                        help="抓取章节数 (默认: 3)")
-    parser.add_argument("--rank_key", type=str, default="hotsales",
-                        choices=['hotsales', 'yuepiao', 'recom', 'collect', 'newbook'],
-                        help="榜单类型 (默认: hotsales)")
-    parser.add_argument("--rank_keys", type=str, default="hotsales,yuepiao,recom,collect",
-                        help="多个榜单的键，用逗号分隔 (默认: hotsales,yuepiao,recom,collect)")
+    parser.add_argument("--chapter_n", type=int, default=_get_qidian_site_cfg().get("chapter_extraction_goal", 3),
+                        help="抓取章节数 (默认: config.WEBSITES[qidian].chapter_extraction_goal 或 3)")
+    parser.add_argument("--rank_key", type=str,
+                        default=_default_rank_key(_get_rank_choices()),
+                        choices=_get_rank_choices(),
+                        help="榜单类型 (默认: 基于config.WEBSITES[qidian].rank_urls)")
+    parser.add_argument("--rank_keys", type=str,
+                        default=_default_rank_keys_csv(_get_rank_choices()),
+                        help="多个榜单的键，用逗号分隔 (默认: 基于config.WEBSITES[qidian].rank_urls)")
     parser.add_argument("--max_books", type=int, default=None,
                         help="每个测试最大处理书籍数 (默认: 使用top_n)")
     parser.add_argument("--verbose", action="store_true",

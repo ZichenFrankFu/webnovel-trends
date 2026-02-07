@@ -449,7 +449,7 @@ class BaseSpider(ABC):
 
     """获取小说前N章内容"""
     @abstractmethod
-    def fetch_first_n_chapters(self, novel_url: str, n: int = 5) -> List[Dict[str, Any]]:
+    def fetch_first_n_chapters(self, novel_url: str, target_chapter_count: int = 5) -> List[Dict[str, Any]]:
         """
         Args:
             novel_url: 小说URL
@@ -694,63 +694,9 @@ class BaseSpider(ABC):
     # ------------------------------------------------------------------
     # Database Operations
     # ------------------------------------------------------------------
-    """从数据库novel_titles表中获取normalized标题(title_norm)"""
-    def _get_novel_title_norm_from_db(self, novel_id: str) -> Optional[str]:
-        """从数据库novel_titles表中获取归一化的标题(title_norm)"""
-        if not self.db_handler:
-            return None
-
-        try:
-            # 使用db_handler的get_novel_title_norm方法
-            if hasattr(self.db_handler, 'get_novel_title_norm'):
-                title_norm = self.db_handler.get_novel_title_norm("qidian", novel_id)
-                if title_norm:
-                    self.logger.debug("[标题查询] 从数据库获取到归一化标题: %s (小说ID: %s)", title_norm, novel_id)
-                else:
-                    self.logger.debug("[标题查询] 数据库中未找到归一化标题 (小说ID: %s)", novel_id)
-                return title_norm
-            else:
-                self.logger.warning("[标题查询] db_handler没有get_novel_title_norm方法")
-                return None
-
-        except Exception as e:
-            self.logger.debug("[标题查询] 获取归一化标题失败 (小说ID: %s): %s", novel_id, e)
-
-        return None
-
-    """获取用于显示的标题，优先使用normalized标题"""
-    def _get_display_title(self, novel_id: str, fallback_title: str = "") -> Tuple[str, str]:
-        """
-
-        Args:
-            novel_id: 小说平台ID
-            fallback_title: 后备标题（当无法从数据库获取时使用）
-
-        Returns:
-            Tuple[显示标题, 标题来源]
-        """
-        # 首先尝试从数据库获取归一化标题
-        title_norm = self._get_novel_title_norm_from_db(novel_id)
-
-        if title_norm:
-            return title_norm, "归一化标题"
-        elif fallback_title:
-            return fallback_title, "原始标题"
-        else:
-            # 如果都没有，尝试从数据库中查询
-            try:
-                if self.db_handler and hasattr(self.db_handler, 'get_novel_title'):
-                    title = self.db_handler.get_novel_title("qidian", novel_id)
-                    if title:
-                        return title, "数据库标题"
-            except Exception as e:
-                self.logger.debug("[标题显示] 获取数据库标题失败: %s", e)
-
-            return f"小说ID:{novel_id}", "ID"
-
+    """保存原始数据到文件"""
     def _save_raw_data(self, data: Any, filename: str) -> None:
-        """保存原始数据到文件
-
+        """
         Args:
             data: 要保存的数据
             filename: 文件名
@@ -767,6 +713,121 @@ class BaseSpider(ABC):
 
         self.logger.debug(f"Raw data saved: {filepath}")
 
+    """获取数据库中已有章节数量"""
+    def _get_existing_chapter_count(self, novel_id: str) -> int:
+        """
+        Args:
+            novel_id: 小说平台ID
+
+        Returns:
+            数据库中已有的章节数量，如果查询失败返回0
+        """
+        if not self.db_handler or not hasattr(self.db_handler, 'get_chapters_count'):
+            return 0
+
+        try:
+            count = self.db_handler.get_chapters_count(novel_id)
+            self.logger.info(f"[章节智能补全] 小说 {novel_id} 在数据库中已有 {count} 章")
+            return count
+        except Exception as e:
+            self.logger.warning(f"[章节智能补全] 查询已有章节数失败: {e}")
+            return 0
+
+    """获取数据库中已有章节"""
+    def _get_existing_chapters(self, novel_id: str, limit: int) -> List[Dict[str, Any]]:
+        """获取数据库中已有章节
+
+        Args:
+            novel_id: 小说平台ID
+            limit: 最大获取章节数
+
+        Returns:
+            已有章节列表
+        """
+        if not self.db_handler or not hasattr(self.db_handler, 'get_novel_chapters'):
+            return []
+
+        try:
+            chapters = self.db_handler.get_novel_chapters(novel_id, limit)
+            self.logger.info(f"[章节智能补全] 从数据库获取小说 {novel_id} 的 {len(chapters)} 个章节")
+            return chapters
+        except Exception as e:
+            self.logger.warning(f"[章节智能补全] 获取已有章节失败: {e}")
+            return []
+
+    """格式化已有章节数据"""
+    def _format_existing_chapters(
+            self,
+            existing_chapters: List[Dict[str, Any]],
+            target_count: int,
+            publish_date: str = "",
+    ) -> List[Dict[str, Any]]:
+        chapters: List[Dict[str, Any]] = []
+        for i, ch in enumerate(existing_chapters[:target_count], 1):
+            chapters.append({
+                "chapter_num": int(ch.get("chapter_num") or i),
+                "chapter_title": ch.get("chapter_title", f"第{i}章"),
+                "chapter_content": ch.get("chapter_content", ""),
+                "chapter_url": ch.get("chapter_url", ""),
+                "word_count": int(ch.get("word_count") or 0),
+                "publish_date": ch.get("publish_date") or publish_date or "",
+            })
+        # 按 chapter_num 排一下，避免 DB 返回乱序
+        chapters.sort(key=lambda x: x["chapter_num"])
+
+        return chapters
+
+    """合并已有章节和新章节"""
+    def _merge_chapters(
+            self,
+            existing_chapters: List[Dict[str, Any]],
+            new_chapters: List[Dict[str, Any]],
+            target_count: int,
+            publish_date: str = "",
+    ) -> List[Dict[str, Any]]:
+        all_chapters: List[Dict[str, Any]] = []
+
+        # 先把已有章节标准化（如果外面已经标准化了也不影响）
+        formatted_existing = self._format_existing_chapters(existing_chapters, target_count, publish_date)
+
+        # new_chapters 假设已是标准 schema；若 publish_date 为空也兜底
+        formatted_new: List[Dict[str, Any]] = []
+        for ch in new_chapters:
+            formatted_new.append({
+                "chapter_num": int(ch.get("chapter_num") or 0),
+                "chapter_title": ch.get("chapter_title", ""),
+                "chapter_content": ch.get("chapter_content", ""),
+                "chapter_url": ch.get("chapter_url", ""),
+                "word_count": int(ch.get("word_count") or 0),
+                "publish_date": ch.get("publish_date") or publish_date or "",
+            })
+
+        all_chapters.extend(formatted_existing)
+        all_chapters.extend(formatted_new)
+
+        # 排序 + 只取 target_count + 重编号
+        all_chapters.sort(key=lambda x: x["chapter_num"])
+        all_chapters = all_chapters[:target_count]
+        for idx, ch in enumerate(all_chapters, 1):
+            ch["chapter_num"] = idx
+        return all_chapters
+
+    def _slice_chapter_infos_to_fetch(
+            self,
+            chapter_infos: Sequence[Any],
+            existing_count: int,
+            need_count: int,
+    ) -> List[Any]:
+        """
+        Generic slicing helper:
+        - skip first `existing_count` items
+        - take next `need_count` items
+        """
+        if not chapter_infos or need_count <= 0:
+            return []
+        start = max(0, int(existing_count))
+        end = start + int(need_count)
+        return list(chapter_infos[start:end])
 
 class MockResponse:
     """模拟requests.Response对象，用于测试"""

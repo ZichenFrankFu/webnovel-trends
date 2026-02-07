@@ -244,7 +244,7 @@ def _test_chapters(spider: Any, db: Any, *, novel_url: str, platform_novel_id: s
         print(f"       目标章节数: {n}")
 
         start_time = time.time()
-        chapters = spider.fetch_first_n_chapters(novel_url, n=n)
+        chapters = spider.fetch_first_n_chapters(novel_url, target_chapter_count=n)
         elapsed_time = time.time() - start_time
 
         print(f"\n[结果] 获取成功 (耗时: {elapsed_time:.2f}秒)")
@@ -464,7 +464,7 @@ def _test_rank_pipeline_fast(spider: Any, db: Any, *, rank_key: str, pages: int,
                     print(f"       需要获取新章节: {need_chapters}章")
 
                     start_chapter_time = time.time()
-                    chapters = spider.fetch_first_n_chapters(novel_url, n=chapter_n)
+                    chapters = spider.fetch_first_n_chapters(novel_url, target_chapter_count=chapter_n)
                     chapter_elapsed = time.time() - start_chapter_time
                     timings["chapters"].append(chapter_elapsed)
 

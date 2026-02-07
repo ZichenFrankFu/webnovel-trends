@@ -131,6 +131,7 @@ WEBSITES = {
         },
         'pages_per_rank': 1,
         'chapter_extraction_goal': 5,
+        'max_log_chapters': 5,
         'selenium_specific': {
             'method': 'dynamic',
         },
