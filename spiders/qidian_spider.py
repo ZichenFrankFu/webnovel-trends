@@ -517,7 +517,7 @@ class QidianSpider(BaseSpider):
     # BaseSpider API: fetch_rank_list
     # ------------------------------------------------------------------
     """Fetch a rank list (multi-page) and return standardized items"""
-    def fetch_rank_list(self, rank_type: str = "hotsales", page = 5) -> List[Dict[str, Any]]:
+    def fetch_rank_list(self, rank_type: str = "畅销榜", page = 5) -> List[Dict[str, Any]]:
         """
         Args:
             rank_type: key in site_config["rank_urls"]

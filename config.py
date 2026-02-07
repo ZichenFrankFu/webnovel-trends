@@ -7,29 +7,29 @@ WEBSITES = {
     'qidian': {
         'name': '起点中文网',
         'rank_urls': {
-            'yuepiao': 'https://www.qidian.com/rank/yuepiao/page{page}/',          # 月票榜
-            'hotsales': 'https://www.qidian.com/rank/hotsales/page{page}/',        # 畅销榜
-            'readIndex': 'https://www.qidian.com/rank/readIndex/page{page}/',      # 阅读指数榜
-            'recom': 'https://www.qidian.com/rank/recom/page{page}/',              # 推荐榜
-            'collect': 'https://www.qidian.com/rank/collect/page{page}/',          # 收藏榜
-            'signnewbook': 'https://www.qidian.com/rank/signnewbook/page{page}/',  # 签约作者新书榜
-            'pubnewbook': 'https://www.qidian.com/rank/pubnewbook/page{page}/',    # 公众作者新书榜
-            'newsign': 'https://www.qidian.com/rank/newsign/page{page}/',          # 新人签约新书榜
-            'newauthor': 'https://www.qidian.com/rank/newauthor/page{page}/',      # 新人作者新书榜
+            '月票榜': 'https://www.qidian.com/rank/yuepiao/page{page}/',          # 月票榜
+            '畅销榜': 'https://www.qidian.com/rank/hotsales/page{page}/',        # 畅销榜
+            '阅读指数榜': 'https://www.qidian.com/rank/readIndex/page{page}/',      # 阅读指数榜
+            '推荐榜': 'https://www.qidian.com/rank/recom/page{page}/',              # 推荐榜
+            '收藏榜': 'https://www.qidian.com/rank/collect/page{page}/',          # 收藏榜
+            '签约作者新书榜': 'https://www.qidian.com/rank/signnewbook/page{page}/',  # 签约作者新书榜
+            '公众作者新书榜': 'https://www.qidian.com/rank/pubnewbook/page{page}/',    # 公众作者新书榜
+            '新人签约新书榜': 'https://www.qidian.com/rank/newsign/page{page}/',          # 新人签约新书榜
+            '新人作者新书榜': 'https://www.qidian.com/rank/newauthor/page{page}/',      # 新人作者新书榜
         },
         "rank_type_map": {
             # 常规榜单
-            "yuepiao": {"rank_family": "月票榜", "rank_sub_cat": ""},
-            "hotsales": {"rank_family": "畅销榜", "rank_sub_cat": ""},
-            "readIndex": {"rank_family": "阅读指数榜", "rank_sub_cat": ""},
-            "recom": {"rank_family": "推荐榜", "rank_sub_cat": ""},
-            "collect": {"rank_family": "收藏榜", "rank_sub_cat": ""},
+            "月票榜": {"rank_family": "月票榜", "rank_sub_cat": ""},
+            "畅销榜": {"rank_family": "畅销榜", "rank_sub_cat": ""},
+            "阅读指数榜": {"rank_family": "阅读指数榜", "rank_sub_cat": ""},
+            "推荐榜": {"rank_family": "推荐榜", "rank_sub_cat": ""},
+            "收藏榜": {"rank_family": "收藏榜", "rank_sub_cat": ""},
 
             # 新书榜
-            "signnewbook": {"rank_family": "新书榜", "rank_sub_cat": "签约作者"},
-            "pubnewbook": {"rank_family": "新书榜", "rank_sub_cat": "公众作者"},
-            "newsign": {"rank_family": "新书榜", "rank_sub_cat": "新人签约"},
-            "newauthor": {"rank_family": "新书榜", "rank_sub_cat": "新人作者"},
+            "签约作者新书榜": {"rank_family": "新书榜", "rank_sub_cat": "签约作者"},
+            "公众作者新书榜": {"rank_family": "新书榜", "rank_sub_cat": "公众作者"},
+            "新人签约新书榜": {"rank_family": "新书榜", "rank_sub_cat": "新人签约"},
+            "新人作者新书榜": {"rank_family": "新书榜", "rank_sub_cat": "新人作者"},
         },
         'base_url': 'https://www.qidian.com',
         'novel_types': ['玄幻','奇幻',
