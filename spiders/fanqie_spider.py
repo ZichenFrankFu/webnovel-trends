@@ -53,7 +53,8 @@ class FanqieSpider(BaseSpider):
         merged_cfg = self._deep_merge_dict(root_cfg, site_config or {})
 
         super().__init__(merged_cfg, db_handler=db_handler)
-
+        self.platform = "fanqie"
+        self.site_key = "fanqie"
         self.default_chapter_count = int(self.site_config.get("chapter_extraction_goal", 5))
         self.rank_type_map: Dict[str, RankIdentity] = self._build_rank_type_map()
         self.char_map = FANQIE_CHAR_MAP
@@ -153,7 +154,7 @@ class FanqieSpider(BaseSpider):
 
     def _should_fill_when_empty(self, field: str, current_value: Any) -> bool:
         """
-        fanqie 用 detail_fallback_rules 控制补全行为（和你 qidian 的逻辑一致风格）
+        fanqie 用 detail_fallback_rules 控制补全行为
         """
         rules = self._cfg_detail_rules().get(field, {}) or {}
         when_empty = bool(rules.get("when_empty", True))
@@ -898,6 +899,11 @@ class FanqieSpider(BaseSpider):
         try:
             existing_count = self._get_existing_chapter_count(novel_id)
 
+            if existing_count >= target_chapter_count:
+                existing = self._get_existing_chapters(novel_id, target_chapter_count)
+                return self._format_existing_chapters(existing, target_chapter_count, publish_date="")
+
+            # 只有需要补全时才访问详情页
             detail = self.fetch_novel_detail(novel_url, novel_id, seed=None)
             display_title = detail.get("title") or f"小说ID:{novel_id}"
             publish_date = detail.get("publish_date", "")

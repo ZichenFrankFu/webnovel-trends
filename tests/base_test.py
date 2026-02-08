@@ -136,6 +136,58 @@ def print_db_counts(db: Any) -> None:
     for k, label in mapping:
         print(f"   {label:<14}: {int(counts.get(k, 0)):>4} 条记录")
 
+def db_get_chapter_count(db: Any, *, platform: str, platform_novel_id: str) -> int:
+    """
+    Return number of stored chapters for (platform, platform_novel_id) in first_n_chapters.
+    Works for SQLite handler exposing .conn or .cursor().
+    """
+    if not db or not platform_novel_id:
+        return 0
+    try:
+        conn = getattr(db, "conn", None)
+        if conn is None and hasattr(db, "get_connection"):
+            conn = db.get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(1) FROM first_n_chapters WHERE platform=? AND platform_novel_id=?",
+            (platform, platform_novel_id),
+        )
+        row = cur.fetchone()
+        return int(row[0] or 0)
+    except Exception:
+        return 0
+
+
+def db_get_max_chapter_index(db: Any, *, platform: str, platform_novel_id: str) -> int:
+    """
+    Return max chapter_index (or chapter_no) stored, if column exists.
+    If schema differs, returns 0 (safe fallback).
+    """
+    if not db or not platform_novel_id:
+        return 0
+    try:
+        conn = getattr(db, "conn", None)
+        if conn is None and hasattr(db, "get_connection"):
+            conn = db.get_connection()
+        cur = conn.cursor()
+
+        # try common column names
+        for col in ("chapter_index", "chapter_no", "idx", "chapter_order"):
+            try:
+                cur.execute(
+                    f"SELECT MAX({col}) FROM first_n_chapters WHERE platform=? AND platform_novel_id=?",
+                    (platform, platform_novel_id),
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    return int(row[0])
+            except Exception:
+                continue
+        return 0
+    except Exception:
+        return 0
+
+
 
 # ------------------------------------------------------------------
 # Misc

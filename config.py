@@ -134,6 +134,18 @@ WEBSITES = {
         'max_log_chapters': 5,
         'selenium_specific': {
             'method': 'dynamic',
+            # 榜单页：等榜单列表结构
+            "rank_wait_css": "div.rank-list, div.rank-body, ul.rank-list, li[data-rid], body",
+            # 详情页：等书籍信息
+            "detail_wait_css": ".info-label, .info-count-item, h1",
+            # 目录页：等章节列表或章节链接
+            "catalog_wait_css": ".catalog-content-wrap, .volume-wrap, .catalog-content, a[href*='/chapter/']",
+            'page_fetch_overrides': {
+                'page_load_sec': 10,
+                'ready_state_sec': 8,
+                'wait_css_sec': 8,
+                'wait_css_required': True,
+            },
         },
         # Rank 页是主来源的字段
         "rank_fields_primary": [
@@ -205,6 +217,16 @@ WEBSITES = {
             "detail_is_scrolling": False,
             "chapter_wait_css": ".muye-reader-content, .reader-content, h1.muye-reader-title, h1",
             "chapter_is_scrolling": False,
+            'page_fetch_overrides': {
+                'page_load_sec': 8,
+                'ready_state_sec': 6,
+                'wait_css_sec': 10,
+                'wait_css_required': True,
+                'min_html_length': 1200,
+            },
+
+
+
         },
         # Fanqie Rank 页主来源字段
         "rank_fields_primary": [
@@ -290,7 +312,7 @@ SELENIUM_CONFIG = {
     },
 
     # 超时设置
-    'timeout': 15,
+    'timeout': 25,
     'implicit_wait': 10,
     'page_load_timeout': 30,
     'script_timeout': 10,
@@ -298,7 +320,7 @@ SELENIUM_CONFIG = {
     # 重连设置
     "retry": {
         "enabled": True,
-        "max_retries": 3,
+        "max_retries": 5,
         "backoff_seconds": 2,
     },
 
@@ -335,12 +357,19 @@ CRAWLER_CONFIG = {
 
     # 通用页面爬虫配置
     'page_fetch': {
-        'max_page_retries': 3,  # 页面获取最大重试次数
+        'max_page_retries': 5,  # 页面获取最大重试次数
         'page_retry_delay': 2,  # 页面重试延迟(秒)
         'default_wait_sec': 12,  # 默认等待时间
-        'post_load_delay_range': {0.8, 1.6},
+        'post_load_delay_range': (0.8, 1.6),
+        'bad_title_keywords': ["404", "无法访问", "出错了"],
         'min_html_length': 1000,
-        'bad_title_keywords': {"404", "无法访问", "出错了"},
+        # 拆分不同阶段的超时，避免互相绑死
+        'page_load_sec': 10,          # driver.get 的超时（建议小一点）
+        'ready_state_sec': 8,         # 等 document.readyState 的超时
+        'wait_css_sec': 8,            # 等 wait_css 的超时
+        'stop_loading_on_timeout': True,  # page load timeout 时执行 window.stop()
+        'wait_css_required': True,    # wait_css 超时是否视为失败（建议 True）
+
     },
 
     # 章节抓取配置

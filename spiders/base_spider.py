@@ -762,45 +762,53 @@ class BaseSpider(ABC):
 
     """获取数据库中已有章节数量"""
     def _get_existing_chapter_count(self, novel_id: str) -> int:
-        """
-        Args:
-            novel_id: 小说平台ID
-
-        Returns:
-            数据库中已有的章节数量，如果查询失败返回0
-        """
-        if not self.db_handler or not hasattr(self.db_handler, 'get_chapters_count'):
+        if not self.db_handler:
             return 0
 
-        try:
-            count = self.db_handler.get_chapters_count(novel_id)
-            self.logger.info(f"[章节智能补全] 小说 {novel_id} 在数据库中已有 {count} 章")
-            return count
-        except Exception as e:
-            self.logger.warning(f"[章节智能补全] 查询已有章节数失败: {e}")
-            return 0
+        # 你的 spider 都是 platform 固定（qidian/fanqie）
+        platform = getattr(self, "platform", None) or getattr(self, "site_key", None) or "qidian"
+
+        # 1) 最推荐：如果 db_handler 有“first_n_chapters”对应的 count 方法
+        for name in ("get_first_n_chapters_count", "count_first_n_chapters", "get_chapters_count"):
+            fn = getattr(self.db_handler, name, None)
+            if not fn:
+                continue
+            try:
+                # 尝试 (platform, platform_novel_id)
+                return int(fn(platform, novel_id))
+            except TypeError:
+                # 退回 (platform_novel_id)
+                try:
+                    return int(fn(novel_id))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        return 0
 
     """获取数据库中已有章节"""
-    def _get_existing_chapters(self, novel_id: str, limit: int) -> List[Dict[str, Any]]:
-        """获取数据库中已有章节
-
-        Args:
-            novel_id: 小说平台ID
-            limit: 最大获取章节数
-
-        Returns:
-            已有章节列表
-        """
-        if not self.db_handler or not hasattr(self.db_handler, 'get_novel_chapters'):
+    def _get_existing_chapters(self, novel_id: str, limit: int):
+        if not self.db_handler:
             return []
 
-        try:
-            chapters = self.db_handler.get_novel_chapters(novel_id, limit)
-            self.logger.info(f"[章节智能补全] 从数据库获取小说 {novel_id} 的 {len(chapters)} 个章节")
-            return chapters
-        except Exception as e:
-            self.logger.warning(f"[章节智能补全] 获取已有章节失败: {e}")
-            return []
+        platform = getattr(self, "platform", None) or getattr(self, "site_key", None) or "qidian"
+
+        for name in ("get_first_n_chapters", "get_novel_chapters"):
+            fn = getattr(self.db_handler, name, None)
+            if not fn:
+                continue
+            try:
+                return fn(platform, novel_id, limit)
+            except TypeError:
+                try:
+                    return fn(novel_id, limit)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        return []
 
     """格式化已有章节数据"""
     def _format_existing_chapters(
@@ -875,6 +883,57 @@ class BaseSpider(ABC):
         start = max(0, int(existing_count))
         end = start + int(need_count)
         return list(chapter_infos[start:end])
+
+    def db_get_chapter_count(db: Any, *, platform: str, platform_novel_id: str) -> int:
+        """
+        Return number of stored chapters for (platform, platform_novel_id) in first_n_chapters.
+        Works for SQLite handler exposing .conn or .cursor().
+        """
+        if not db or not platform_novel_id:
+            return 0
+        try:
+            conn = getattr(db, "conn", None)
+            if conn is None and hasattr(db, "get_connection"):
+                conn = db.get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COUNT(1) FROM first_n_chapters WHERE platform=? AND platform_novel_id=?",
+                (platform, platform_novel_id),
+            )
+            row = cur.fetchone()
+            return int(row[0] or 0)
+        except Exception:
+            return 0
+
+    def db_get_max_chapter_index(db: Any, *, platform: str, platform_novel_id: str) -> int:
+        """
+        Return max chapter_index (or chapter_no) stored, if column exists.
+        If schema differs, returns 0 (safe fallback).
+        """
+        if not db or not platform_novel_id:
+            return 0
+        try:
+            conn = getattr(db, "conn", None)
+            if conn is None and hasattr(db, "get_connection"):
+                conn = db.get_connection()
+            cur = conn.cursor()
+
+            # try common column names
+            for col in ("chapter_index", "chapter_no", "idx", "chapter_order"):
+                try:
+                    cur.execute(
+                        f"SELECT MAX({col}) FROM first_n_chapters WHERE platform=? AND platform_novel_id=?",
+                        (platform, platform_novel_id),
+                    )
+                    row = cur.fetchone()
+                    if row and row[0] is not None:
+                        return int(row[0])
+                except Exception:
+                    continue
+            return 0
+        except Exception:
+            return 0
+
 
 class MockResponse:
     """模拟requests.Response对象，用于测试"""

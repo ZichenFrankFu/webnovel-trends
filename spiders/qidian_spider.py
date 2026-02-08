@@ -248,6 +248,8 @@ class QidianSpider(BaseSpider):
                 self.logger.warning(f"[分类解析] 无法识别的分类: '{raw}'")
                 return "未知", raw if raw else None
 
+
+
     """从起点的小说url中获取起点的uid"""
     def _extract_novel_id_from_url(self, url: str) -> str:
         patterns = [

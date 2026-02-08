@@ -161,7 +161,7 @@ python tests/qidian_test.py --test full --rank_key "月票榜"
 ```bash
 python tests/qidian_test.py --test multi_ranks --rank_keys "月票榜,畅销榜,推荐榜"
 ```
-#### 3.3.4 智能补全测试
+#### 3.3.4 智能补全测试（只测试抓取，不写入数据库）
 ```bash
 python tests/qidian_test.py --test smart_fetch --rank_key "月票榜" --pages 1 --chapter_n1 3 --chapter_n2 5
 ```
@@ -204,7 +204,7 @@ python tests/fanqie_test.py --test full --rank_key "阅读榜科幻末世"
 ```bash
 python tests/fanqie_test.py --test multi_ranks --rank_keys "阅读榜西方奇幻,阅读榜科幻末世,新书榜西方奇幻"
 ```
-#### 3.3.5 智能补全测试
+#### 3.3.5 智能补全测试（只测试抓取，不写入数据库）
 ```bash
 python tests/fanqie_test.py --test smart_fetch --rank_key "阅读榜西方奇幻" --pages 1 --chapter_n1 3 --chapter_n2 5
 ```

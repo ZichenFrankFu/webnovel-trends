@@ -39,6 +39,8 @@ from base_test import (
     pick_first,
     safe_pid,
     safe_trunc,
+    db_get_chapter_count,
+    db_get_max_chapter_index,
 )
 
 # ------------------------------------------------------------------
@@ -416,13 +418,17 @@ def run_multi_ranks(*, rank_keys: List[str], pages: int, top_n: int, chapter_n: 
 
 def run_smart_fetch(*, rank_key: str, pages: int, chapter_n1: int, chapter_n2: int, verbose: bool = False) -> None:
     """
-    Smart-fetch experiment (DB-backed):
-    - fetch one rank
-    - pick top #1 book
-    - fetch detail metadata
-    - fetch chapters twice with different target chapter_n.
-    Expectation: if spider/DB layer supports intelligent completion, the 2nd run should
-    fetch only the delta and be faster.
+    Smart-fetch experiment (DB-backed) with clearer diagnostics:
+
+    What we want to know:
+    1) run#2 是否只“补抓 delta = chapter_n2 - chapter_n1”？
+    2) run#2 是否仍然发生“重复网络抓取 1..chapter_n1”，导致耗时接近从零抓 chapter_n2？
+    3) 用 baseline（从零抓 chapter_n2）对照 run#2，判断是否真正 skip 了重复抓取。
+
+    Output focuses on:
+    - DB before/after counts
+    - DB max chapter index delta (if schema supports)
+    - baseline scratch fetch time
     """
     print_header(
         "[Test] smart_fetch - 同一本书两次抓取不同 chapter_n（验证智能补全/去重抓取）",
@@ -438,6 +444,9 @@ def run_smart_fetch(*, rank_key: str, pages: int, chapter_n1: int, chapter_n2: i
         print(f"[WARN] chapter_n2 ({chapter_n2}) < chapter_n1 ({chapter_n1})，自动交换以保证递增")
         chapter_n1, chapter_n2 = chapter_n2, chapter_n1
 
+    expected_delta = chapter_n2 - chapter_n1
+
+    # Main DB (clean)
     db_path = _ensure_clean_dirs()
     db = init_db(db_path, is_test=True)
     spider = None
@@ -446,6 +455,7 @@ def run_smart_fetch(*, rank_key: str, pages: int, chapter_n1: int, chapter_n2: i
     try:
         spider = _init_spider(db=db)
 
+        # pick one sample
         items, t_rank = _step_fetch_rank(spider, rank_key=rank_key, pages=pages)
         items = (items or [])[:1]
         print(f"[计时] fetch_rank_list: {fmt_sec(t_rank)} | picked={len(items)}")
@@ -459,37 +469,123 @@ def run_smart_fetch(*, rank_key: str, pages: int, chapter_n1: int, chapter_n2: i
         url = book.get("url", "")
         print(f"\n[样本] 《{safe_trunc(book.get('title',''),40)}》 pid={pid}")
 
+        # Detail (optional for DB row)
         with Timer("fetch_novel_detail") as t_det:
             detail = spider.fetch_novel_detail(url, pid, seed=book)
         print(f"[计时] fetch_novel_detail: {fmt_sec(t_det.elapsed)}")
 
-        # run#1 chapters
+        platform = "fanqie"
+
+        # --------------------------
+        # run#1
+        # --------------------------
+        before1 = db_get_chapter_count(db, platform=platform, platform_novel_id=pid)
+        max1 = db_get_max_chapter_index(db, platform=platform, platform_novel_id=pid)
+        print(f"[DB] before run#1: count={before1} max_idx={max1}")
+
         chapters1, t_ch1 = _step_fetch_chapters(spider, novel_url=url, target_chapter_count=chapter_n1)
-        print(f"[计时] fetch_first_n_chapters #1: {fmt_sec(t_ch1)} | chapters={len(chapters1)} | target={chapter_n1}")
+        print(f"[计时] fetch_first_n_chapters #1: {fmt_sec(t_ch1)} | returned={len(chapters1)} | target={chapter_n1}")
 
         t_db1 = _step_db_upsert_chapters(db, book=detail or book, chapters=chapters1, snapshot_date=snapshot_date)
         if t_db1 > 0:
             print(f"[计时] db_upsert_first_n_chapters #1: {fmt_sec(t_db1)}")
 
-        # run#2 chapters
+        after1 = db_get_chapter_count(db, platform=platform, platform_novel_id=pid)
+        max1b = db_get_max_chapter_index(db, platform=platform, platform_novel_id=pid)
+        print(f"[DB] after  run#1: count={after1} max_idx={max1b} | count_delta={after1 - before1} | max_delta={max1b - max1}")
+
+        # --------------------------
+        # run#2 (delta)
+        # --------------------------
+        before2 = db_get_chapter_count(db, platform=platform, platform_novel_id=pid)
+        max2 = db_get_max_chapter_index(db, platform=platform, platform_novel_id=pid)
+        print(f"\n[DB] before run#2: count={before2} max_idx={max2} | expected_delta={expected_delta}")
+
         chapters2, t_ch2 = _step_fetch_chapters(spider, novel_url=url, target_chapter_count=chapter_n2)
-        print(f"[计时] fetch_first_n_chapters #2: {fmt_sec(t_ch2)} | chapters={len(chapters2)} | target={chapter_n2}")
+        print(f"[计时] fetch_first_n_chapters #2: {fmt_sec(t_ch2)} | returned={len(chapters2)} | target={chapter_n2}")
 
         t_db2 = _step_db_upsert_chapters(db, book=detail or book, chapters=chapters2, snapshot_date=snapshot_date)
         if t_db2 > 0:
             print(f"[计时] db_upsert_first_n_chapters #2: {fmt_sec(t_db2)}")
 
-        print("\n[对比结果]")
-        print(f"  - run#1 target={chapter_n1}: {fmt_sec(t_ch1)}")
-        print(f"  - run#2 target={chapter_n2}: {fmt_sec(t_ch2)}")
-        diff = t_ch1 - t_ch2
-        if diff > 0:
-            print(f"  - 预期现象: 第二次更快 (Δ={diff:.2f}s)")
+        after2 = db_get_chapter_count(db, platform=platform, platform_novel_id=pid)
+        max2b = db_get_max_chapter_index(db, platform=platform, platform_novel_id=pid)
+        print(f"[DB] after  run#2: count={after2} max_idx={max2b} | count_delta={after2 - before2} | max_delta={max2b - max2}")
+
+        # --------------------------
+        # baseline: scratch fetch chapter_n2 on a fresh DB
+        # --------------------------
+        baseline_rel = os.path.join("test_output", "fanqie_test_baseline.db")
+        baseline_path = ensure_clean_dirs(db_relpath=baseline_rel, remove_db=True)
+        baseline_db = init_db(baseline_path, is_test=True)
+        baseline_spider = None
+        t_scratch = None
+
+        try:
+            baseline_spider = _init_spider(db=baseline_db)
+            # ensure novel exists (optional)
+            try:
+                baseline_spider.fetch_novel_detail(url, pid, seed=book)
+            except Exception:
+                pass
+
+            with Timer("baseline_scratch_fetch") as t0:
+                _ = baseline_spider.fetch_first_n_chapters(url, target_chapter_count=int(chapter_n2))
+            t_scratch = t0.elapsed
+            print(f"\n[Baseline] scratch fetch target={chapter_n2}: {fmt_sec(t_scratch)} | db={baseline_path}")
+        finally:
+            try:
+                if baseline_spider:
+                    baseline_spider.close()
+            except Exception:
+                pass
+
+        # --------------------------
+        # conclusion
+        # --------------------------
+        print("\n[判定结论]")
+        print(f"  - run#1 fetch time: {fmt_sec(t_ch1)} (target={chapter_n1})")
+        print(f"  - run#2 fetch time: {fmt_sec(t_ch2)} (target={chapter_n2})")
+        if t_scratch is not None:
+            print(f"  - baseline scratch : {fmt_sec(t_scratch)} (target={chapter_n2})")
+
+        max_delta = max2b - max2
+        count_delta = after2 - before2
+
+        print("\n[DB增量检查]")
+        print(f"  - expected_delta = {expected_delta}")
+        print(f"  - db count_delta = {count_delta}")
+        print(f"  - db max_delta   = {max_delta}")
+
+        # DB delta inference
+        db_delta_ok = False
+        if expected_delta == 0:
+            db_delta_ok = True
         else:
-            print(f"  - 注意: 第二次未明显更快 (Δ={diff:.2f}s)。若 spider 内部未实现智能补全，则属正常。")
+            if max_delta == expected_delta:
+                db_delta_ok = True
+            elif max_delta == 0 and count_delta == expected_delta:
+                # schema may not support max idx but count increased
+                db_delta_ok = True
+
+        if db_delta_ok:
+            print("  - 结果: DB 侧看起来只新增了缺失章节（去重/补全逻辑可能有效）")
+        else:
+            print("  - 结果: DB 增量异常（可能重复写入、索引字段未写入、或补全判断依赖字段缺失）")
+
+        if t_scratch is not None and t_scratch > 0:
+            ratio = t_ch2 / t_scratch
+            print("\n[网络重复抓取倾向]")
+            print(f"  - run#2 / scratch ratio = {ratio:.2f}")
+            if ratio < 0.65 and expected_delta > 0:
+                print("  - 结果: run#2 明显小于从零抓取，倾向于 spider 真的跳过了重复抓取")
+            elif ratio > 0.85 and expected_delta > 0:
+                print("  - 结果: run#2 接近从零抓取，倾向于 spider 仍在重复抓前面章节（spider问题）")
+            else:
+                print("  - 结果: 介于两者之间；建议再跑一次或提高 chapter_n2 让差异更明显")
 
         print_db_counts(db)
-        print(f"\n[输出] 数据库文件: {db_path}")
+        print(f"\n[输出] 主数据库文件: {db_path}")
 
     finally:
         try:
