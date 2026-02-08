@@ -261,7 +261,7 @@ class BaseSpider(ABC):
         cfg = {**global_fetch, **site_fetch}
 
         _wait_sec = int(wait_sec if wait_sec is not None else cfg.get("default_wait_sec", 10))
-        _max_retries = int(max_retries if max_retries is not None else cfg.get("max_page_retries", 2))
+        _max_retries = int(max_retries if max_retries is not None else cfg.get("max_page_retries", 3))
         _retry_delay = float(retry_delay if retry_delay is not None else cfg.get("page_retry_delay", 3))
 
         post_load_delay = cfg.get("post_load_delay_range", (1, 2))
@@ -762,28 +762,34 @@ class BaseSpider(ABC):
 
     """获取数据库中已有章节数量"""
     def _get_existing_chapter_count(self, novel_id: str) -> int:
-        if not self.db_handler:
+        """Return stored chapter count for (platform, platform_novel_id) using db_handler API."""
+        if not self.db_handler or not novel_id:
             return 0
 
-        # 你的 spider 都是 platform 固定（qidian/fanqie）
-        platform = getattr(self, "platform", None) or getattr(self, "site_key", None) or "qidian"
+        # 统一平台 key：qidian / fanqie
+        platform = getattr(self, "site_key", None) or "qidian"
+        platform = str(platform).lower()
 
-        # 1) 最推荐：如果 db_handler 有“first_n_chapters”对应的 count 方法
-        for name in ("get_first_n_chapters_count", "count_first_n_chapters", "get_chapters_count"):
-            fn = getattr(self.db_handler, name, None)
-            if not fn:
-                continue
+        # 优先走 DatabaseHandler 的 public 方法
+        if hasattr(self.db_handler, "get_first_n_chapter_count"):
             try:
-                # 尝试 (platform, platform_novel_id)
-                return int(fn(platform, novel_id))
-            except TypeError:
-                # 退回 (platform_novel_id)
-                try:
-                    return int(fn(novel_id))
-                except Exception:
-                    pass
+                count = self.db_handler.get_first_n_chapter_count(platform=platform, platform_novel_id=novel_id)
+                self.logger.debug(f"[章节数查询][FINAL] platform={platform} novel_id={novel_id} -> {count}")
+                return int(count or 0)
             except Exception:
-                pass
+                return 0
+
+        # 兼容旧 handler（如果你未来换实现）
+        for method_name in ["get_chapter_count", "count_first_n_chapters", "get_first_n_chapters_count"]:
+            if hasattr(self.db_handler, method_name):
+                try:
+                    method = getattr(self.db_handler, method_name)
+                    try:
+                        return int(method(platform, novel_id) or 0)
+                    except TypeError:
+                        return int(method(novel_id) or 0)
+                except Exception:
+                    continue
 
         return 0
 

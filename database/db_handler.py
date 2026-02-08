@@ -812,6 +812,55 @@ class DatabaseHandler:
         return int(self._run_with_retry(_do))
 
     # --------------------------
+    # public: query First_N_chapters
+    # --------------------------
+
+    def get_first_n_chapter_count(self, *, platform: str, platform_novel_id: str) -> int:
+        """Return COUNT(*) of stored opening chapters for a novel."""
+        if not platform or not platform_novel_id:
+            return 0
+
+        def _do() -> int:
+            with self._tx(immediate=False) as conn:
+                row = conn.execute(
+                    "SELECT novel_uid FROM novels WHERE platform=? AND platform_novel_id=?",
+                    (platform, platform_novel_id),
+                ).fetchone()
+                if not row:
+                    return 0
+                novel_uid = int(row["novel_uid"])
+                c = conn.execute(
+                    "SELECT COUNT(*) AS c FROM first_n_chapters WHERE novel_uid=?",
+                    (novel_uid,),
+                ).fetchone()
+                return int(c["c"] or 0)
+
+        return int(self._run_with_retry(_do))
+
+    def get_first_n_chapter_max_num(self, *, platform: str, platform_novel_id: str) -> int:
+        """Return MAX(chapter_num) stored for a novel."""
+        if not platform or not platform_novel_id:
+            return 0
+
+        def _do() -> int:
+            with self._tx(immediate=False) as conn:
+                row = conn.execute(
+                    "SELECT novel_uid FROM novels WHERE platform=? AND platform_novel_id=?",
+                    (platform, platform_novel_id),
+                ).fetchone()
+                if not row:
+                    return 0
+                novel_uid = int(row["novel_uid"])
+                r = conn.execute(
+                    "SELECT MAX(chapter_num) AS m FROM first_n_chapters WHERE novel_uid=?",
+                    (novel_uid,),
+                ).fetchone()
+                return int(r["m"] or 0)
+
+        return int(self._run_with_retry(_do))
+
+
+    # --------------------------
     # inspection
     # --------------------------
 

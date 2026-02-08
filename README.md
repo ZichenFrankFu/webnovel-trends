@@ -31,23 +31,26 @@ webnovel_trends/
 │   └── db_handler.py        # 数据库交互操作
 ├── tasks/
 │   └── scheduler.py         # 任务调度器
+│   └── run_spiders_once.py  # 跑所有spider一次的任务
 ├── spiders/
 │   ├── base_spider.py       # 爬虫基类
 │   ├── qidian_spider.py     # 起点爬虫
 │   ├── fanqie_spider.py     # 番茄爬虫
 │   ├── fanqie_font_decoder  # 番茄解码
-│   ├── request_handler      # Selenium 请求
 ├── outputs/
 │   ├── logs/                # 日志文件
 │   ├── data/                # 数据存储
 │   └── reports/             # 分析报告
+│   └── screenshots/         # 快照
 ├── tests/                   # 测试
+│   ├── base_test.py         # 测试基类
 │   ├── qidian_test.py       # 起点爬虫测试
 │   ├── fanqie_test.py       # 番茄爬虫测试
 ├── config.py                # 配置文件
 ├── requirements.txt         # 依赖列表
 ├── main.py                  # 主程序入口
 └── README.md                # 项目说明
+└── DB_Doc.md                # 数据库说明
 ```
 
 ### 2.2 Database Structure (ER-Diagram)

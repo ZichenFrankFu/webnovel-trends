@@ -1709,8 +1709,9 @@ class QidianSpider(BaseSpider):
         self.logger.info("[章节智能补全] 开始智能获取数据库中缺少的章节: 《%s》 (ID: %s), 目标%d章",
                          display_title, novel_id, target_chapter_count)
 
-        # 1. 检查数据库中已有章节数
+        # 1. 检查数据库中已有章节数 - 修复：使用更可靠的查询方法
         existing_count = self._get_existing_chapter_count(novel_id)
+        self.logger.info(f"[章节智能补全] 数据库查询到已有章节数: {existing_count}")
 
         # 2. 如果已有章节数 >= 目标章节数，直接从数据库获取
         if existing_count >= target_chapter_count:
@@ -1734,16 +1735,27 @@ class QidianSpider(BaseSpider):
         existing_chapters = []
         if existing_count > 0:
             existing_chapters = self._get_existing_chapters(novel_id, existing_count)
-            self.logger.info(f"[章节智能补全] 已有{existing_count}章，需要补充{target_chapter_count - existing_count}章")
+            self.logger.info(f"[章节智能补全] 从数据库获取到已有章节: {len(existing_chapters)} 章")
 
-        # 4. publish_date 将在抓取章节时一并从章节页提取（避免和 fetch_novel_detail 重复访问）
-        detail = self.fetch_novel_detail(novel_url, novel_id, seed={"title": fallback_title} if fallback_title else None)
+            # 记录已有章节的信息用于调试
+            for i, ch in enumerate(existing_chapters[:3], 1):
+                self.logger.info(f"[章节智能补全] 已有第{i}章: 标题='{ch.get('chapter_title', '')}', "
+                                 f"URL={ch.get('chapter_url', '')[:50]}...")
+
+        # 4. publish_date 将在抓取章节时一并从章节页提取
+        detail = self.fetch_novel_detail(novel_url, novel_id,
+                                         seed={"title": fallback_title} if fallback_title else None)
         publish_date = ""
 
         # 5. 计算需要抓取的新章节数
         new_chapter_count = target_chapter_count - existing_count
+        self.logger.info(f"[章节智能补全] 需要抓取的新章节数: {new_chapter_count}")
 
         # 6. 从网站抓取新章节（跳过已有章节）
+        if new_chapter_count <= 0:
+            self.logger.info(f"[章节智能补全] 无需抓取新章节，返回已有章节")
+            return self._format_existing_chapters(existing_chapters, target_chapter_count)
+
         self.logger.info(f"[章节智能补全] 开始抓取{new_chapter_count}个新章节")
 
         # 构建目录页面URL
@@ -1784,7 +1796,8 @@ class QidianSpider(BaseSpider):
             self.logger.info("[章节智能补全] 《%s》 - 抓取第%d章: %s", display_title, chapter_num, chapter_title)
 
             try:
-                chapter_content, chapter_publish_date = self._fetch_single_chapter_with_meta(chapter_url, display_title=display_title)
+                chapter_content, chapter_publish_date = self._fetch_single_chapter_with_meta(chapter_url,
+                                                                                             display_title=display_title)
 
                 if chapter_content:
                     # 优先使用目录页提取的发布时间；否则用章节页解析的；再否则用已知 publish_date 兜底
@@ -1818,59 +1831,105 @@ class QidianSpider(BaseSpider):
         # 8. 合并已有章节和新章节
         all_chapters = self._merge_chapters(existing_chapters, new_chapters, target_chapter_count)
 
-        # 9. 保存新章节到数据库 - 关键修复点
+        # 9. 保存新章节到数据库
         if new_chapters and self.db_handler:
             self.logger.info(f"[章节智能补全] 准备保存 {len(new_chapters)} 个新章节到数据库")
 
             try:
                 # 准备小说基本信息
                 novel_data = {
-                    'novel_id': novel_id,
                     'title': detail.get('title', ''),
-                    'author': detail.get('author', '未知'),
-                    'platform': 'qidian',
-                    'novel_url': novel_url,
-                    'category': detail.get('main_category', ''),
-                    'introduction': detail.get('intro', ''),
-                    'tags': detail.get('tags', []),
+                    'author': detail.get('author', ''),
+                    'intro': detail.get('intro', ''),
+                    'main_category': detail.get('main_category', ''),
                     'status': detail.get('status', ''),
                     'total_words': detail.get('total_words', 0),
-                    'publish_date': publish_date,
+                    'url': novel_url,
+                    'tags': detail.get('tags', []),
                 }
 
-                # 尝试直接保存章节
+                # 使用第一个章节的发布时间
+                first_chapter_publish_date = ""
+                if new_chapters:
+                    first_chapter_publish_date = new_chapters[0].get('publish_date', '')
+
+                # 调用数据库保存方法
                 if hasattr(self.db_handler, 'upsert_first_n_chapters'):
                     self.logger.info("[章节保存] 使用 upsert_first_n_chapters 方法保存章节")
 
-                    # 获取第一个章节的发布时间
-                    first_chapter_publish_date = ""
-                    if new_chapters:
-                        first_chapter_publish_date = new_chapters[0].get('publish_date', publish_date)
+                    # 确保章节有正确的 platform 和 platform_novel_id
+                    for chapter in new_chapters:
+                        chapter['platform'] = 'qidian'
+                        chapter['platform_novel_id'] = novel_id
 
                     result = self.db_handler.upsert_first_n_chapters(
                         platform="qidian",
                         platform_novel_id=novel_id,
                         publish_date=first_chapter_publish_date,
                         chapters=new_chapters,
-                        novel_fallback_fields={
-                            "title": detail.get('title', ''),
-                            "author": detail.get('author', ''),
-                            "intro": detail.get('intro', ''),
-                            "main_category": detail.get('main_category', ''),
-                            "status": detail.get('status', ''),
-                            "total_words": detail.get('total_words', 0),
-                            "url": novel_url,
-                            "tags": detail.get('tags', []),
-                        },
+                        novel_fallback_fields=novel_data,
                     )
                     self.logger.info(f"[章节智能补全] upsert_first_n_chapters 返回结果: {result}")
                 else:
-                    self.logger.error("[章节智能补全] db_handler 没有可用的章节保存方法")
+                    self.logger.warning("[章节智能补全] db_handler 没有 upsert_first_n_chapters 方法")
 
             except Exception as e:
                 self.logger.error(f"[章节智能补全] 保存章节到数据库失败: {e}")
                 import traceback
                 self.logger.error(f"详细错误: {traceback.format_exc()}")
+
+        return all_chapters
+
+    # 修改 _merge_chapters 方法，确保正确重编号
+    def _merge_chapters(
+            self,
+            existing_chapters: List[Dict[str, Any]],
+            new_chapters: List[Dict[str, Any]],
+            target_count: int,
+            publish_date: str = "",
+    ) -> List[Dict[str, Any]]:
+        """
+        合并已有章节和新章节，并确保正确重编号
+        """
+        all_chapters: List[Dict[str, Any]] = []
+
+        # 先添加已有章节（确保格式正确）
+        for ch in existing_chapters:
+            all_chapters.append({
+                "chapter_num": int(ch.get("chapter_num") or 0),
+                "chapter_title": ch.get("chapter_title", ""),
+                "chapter_content": ch.get("chapter_content", ""),
+                "chapter_url": ch.get("chapter_url", ""),
+                "word_count": int(ch.get("word_count") or 0),
+                "publish_date": ch.get("publish_date") or publish_date or "",
+            })
+
+        # 添加新章节（注意新章节的编号可能从 existing_count+1 开始）
+        for ch in new_chapters:
+            all_chapters.append({
+                "chapter_num": int(ch.get("chapter_num") or len(all_chapters) + 1),
+                "chapter_title": ch.get("chapter_title", ""),
+                "chapter_content": ch.get("chapter_content", ""),
+                "chapter_url": ch.get("chapter_url", ""),
+                "word_count": int(ch.get("word_count") or 0),
+                "publish_date": ch.get("publish_date") or publish_date or "",
+            })
+
+        # 按 chapter_num 排序
+        all_chapters.sort(key=lambda x: x["chapter_num"])
+
+        # 只取目标数量的章节
+        all_chapters = all_chapters[:target_count]
+
+        # 重新编号（确保从1开始连续）
+        for idx, ch in enumerate(all_chapters, 1):
+            ch["chapter_num"] = idx
+
+        self.logger.info(f"[章节合并] 合并后章节数: {len(all_chapters)}, 目标: {target_count}")
+
+        # 输出前几章的编号用于调试
+        for i, ch in enumerate(all_chapters[:min(3, len(all_chapters))], 1):
+            self.logger.info(f"[章节合并] 第{i}章: 编号={ch['chapter_num']}, 标题='{ch['chapter_title']}'")
 
         return all_chapters
 

@@ -53,6 +53,7 @@ class FanqieSpider(BaseSpider):
         merged_cfg = self._deep_merge_dict(root_cfg, site_config or {})
 
         super().__init__(merged_cfg, db_handler=db_handler)
+        self.site_key = "fanqie"
         self.platform = "fanqie"
         self.site_key = "fanqie"
         self.default_chapter_count = int(self.site_config.get("chapter_extraction_goal", 5))
@@ -972,8 +973,37 @@ class FanqieSpider(BaseSpider):
                     self._humanlike_sleep(1.0, 2.5)
 
             self.logger.info(f"[章节智能补全] 《{display_title}》 成功抓取 {len(new_chapters)} 章新章节")
-            return self._merge_chapters(existing_chapters, new_chapters, target_chapter_count, publish_date=publish_date)
+            if new_chapters and self.db_handler and hasattr(self.db_handler, "upsert_first_n_chapters"):
+                first_publish_date = (
+                        (new_chapters[0].get("publish_date") or "").strip()
+                        or (publish_date or "").strip()
+                        or self._today_str()
+                )
 
+                self.logger.info(f"[章节智能补全] 准备保存 {len(new_chapters)} 个新章节到数据库")
+                try:
+                    upsert_n = self.db_handler.upsert_first_n_chapters(
+                        platform="fanqie",
+                        platform_novel_id=novel_id,
+                        publish_date=first_publish_date,
+                        chapters=new_chapters,
+                        novel_fallback_fields={
+                            "title": detail.get("title", ""),
+                            "author": detail.get("author", ""),
+                            "intro": detail.get("intro", ""),
+                            "main_category": detail.get("main_category", ""),
+                            "status": detail.get("status", ""),
+                            "total_words": detail.get("total_words", 0),
+                            "url": detail.get("url", novel_url),
+                            "tags": detail.get("tags", []),
+                        },
+                    )
+                    self.logger.info(f"[章节智能补全] upsert_first_n_chapters 返回结果: {upsert_n}")
+                except Exception as e:
+                    self.logger.error(f"[章节智能补全] 保存章节失败: {e}")
+
+            return self._merge_chapters(existing_chapters, new_chapters, target_chapter_count,
+                                        publish_date=publish_date)
         except Exception as e:
             self.logger.error(f"[章节获取] 获取小说章节内容失败 {novel_url}: {e}")
             return []

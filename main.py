@@ -1,188 +1,90 @@
 # main.py
-
 import argparse
-import os
-import sys
 from datetime import datetime
-import config
 from tasks.scheduler import TaskScheduler
-from spiders.qidian_spider import QidianSpider
-from spiders.fanqie_spider import FanqieSpider
-from database.db_handler import DatabaseHandler
 
-# 添加项目路径
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+from tasks.run_spiders_once import run_once
+from tasks.scheduler import TaskScheduler
+import config
+print("CONFIG FILE:", config.__file__)
+print("max_page_retries:", config.CRAWLER_CONFIG["page_fetch"].get("max_page_retries"))
 
 
-def run_once():
-    # 初始化数据库
-    db_path = config.DATABASE['path']
-    db = DatabaseHandler(db_path)
-    print(f"数据库已初始化: {db_path}")
+def _split_csv(s: str) -> list[str]:
+    s = (s or "").strip()
+    if not s:
+        return []
+    return [x.strip() for x in s.split(",") if x.strip()]
 
-    # 初始化爬虫
-    print("\n初始化爬虫...")
-
-    # 起点爬虫 - 注入数据库处理器
-    qidian_config = config.WEBSITES['qidian']
-    qidian_spider = QidianSpider(qidian_config, db_handler=db)
-    print(f"✓ 起点爬虫初始化完成")
-
-    # 番茄爬虫 - 注入数据库处理器
-    fanqie_config = config.WEBSITES['fanqie']
-    fanqie_spider = FanqieSpider(fanqie_config, db_handler=db)
-    print(f"✓ 番茄爬虫初始化完成")
-
-    # 抓取所有榜单
-    print("\n开始抓取榜单数据...")
-
-    # 获取配置中的榜单类型
-    qidian_rank_types = list(qidian_config.get("rank_urls", {}).keys())
-    fanqie_rank_types = list(fanqie_config.get("rank_urls", {}).keys())
-
-    print(f"起点榜单类型: {qidian_rank_types}")
-    print(f"番茄榜单类型: {fanqie_rank_types}")
-
-    # 抓取起点数据
-    print("\n抓取起点榜单...")
-    try:
-        all_qidian_results = []
-
-        # 遍历所有榜单类型
-        for rank_type in qidian_rank_types[:3]:  # 先测试前3个榜单
-            print(f"处理起点榜单: {rank_type}")
-
-            try:
-                # 使用新的一站式方法抓取榜单
-                result = qidian_spider.fetch_and_save_rank(
-                    rank_type=rank_type,
-                    pages=5,  # 每榜抓取2页（可根据需要调整）
-                    enrich_detail=True,
-                    enrich_chapters=True,  # 抓取章节
-                    chapter_count=5,  # 每本书抓取5章
-                    max_books=20,  # 每榜处理前20本书
-                )
-
-                all_qidian_results.append(result)
-                print(f"  完成: {rank_type}, 处理了 {len(result.get('items', []))} 本书")
-
-            except Exception as e:
-                print(f"  处理榜单 {rank_type} 失败: {e}")
-                continue
-
-        # 统计起点数据
-        total_qidian_books = 0
-        total_qidian_chapters = 0
-        for result in all_qidian_results:
-            items = result.get('items', [])
-            total_qidian_books += len(items)
-            for book in items:
-                chapters = book.get('first_n_chapters', [])
-                total_qidian_chapters += len(chapters)
-
-        print(f"\n起点数据统计: {total_qidian_books} 本书, {total_qidian_chapters} 个章节")
-
-    except Exception as e:
-        print(f"起点数据抓取失败: {e}")
-        import traceback
-        traceback.print_exc()
-
-    # 抓取番茄数据
-    print("\n抓取番茄榜单...")
-    try:
-        all_fanqie_results = []
-
-        # 遍历所有榜单类型
-        for rank_type in fanqie_rank_types[:2]:  # 先测试前2个榜单
-            print(f"处理番茄榜单: {rank_type}")
-
-            try:
-                # 使用新的一站式方法抓取榜单
-                result = fanqie_spider.fetch_and_save_rank(
-                    rank_type=rank_type,
-                    pages=2,  # 每榜抓取2页（可根据需要调整）
-                    enrich_detail=True,
-                    enrich_chapters=True,  # 抓取章节
-                    chapter_count=5,  # 每本书抓取5章
-                    max_books=20,  # 每榜处理前20本书
-                )
-
-                all_fanqie_results.append(result)
-                print(f"  完成: {rank_type}, 处理了 {len(result.get('items', []))} 本书")
-
-            except Exception as e:
-                print(f"  处理榜单 {rank_type} 失败: {e}")
-                continue
-
-        # 统计番茄数据
-        total_fanqie_books = 0
-        total_fanqie_chapters = 0
-        for result in all_fanqie_results:
-            items = result.get('items', [])
-            total_fanqie_books += len(items)
-            for book in items:
-                chapters = book.get('first_n_chapters', [])
-                total_fanqie_chapters += len(chapters)
-
-        print(f"\n番茄数据统计: {total_fanqie_books} 本书, {total_fanqie_chapters} 个章节")
-
-    except Exception as e:
-        print(f"番茄数据抓取失败: {e}")
-        import traceback
-        traceback.print_exc()
-
-    # 关闭爬虫
-    print("\n关闭爬虫...")
-    qidian_spider.close()
-    fanqie_spider.close()
-    print("爬虫已关闭")
-
-    # 统计数据
-    print("\n" + "=" * 60)
-    print("数据抓取完成")
-    print("=" * 60)
-
-    # 获取今日数据统计
-    today = datetime.now().strftime('%Y-%m-%d')
-    print(f"\n今日数据统计 ({today}):")
-
-    # 起点数据
-    qidian_books_today = db.get_today_rankings(platform='qidian')
-    print(f"起点中文网: {len(qidian_books_today)} 本书")
-
-    # 番茄数据
-    fanqie_books_today = db.get_today_rankings(platform='fanqie')
-    print(f"番茄小说: {len(fanqie_books_today)} 本书")
-
-    print("\n抓取完成!")
 
 
 def run_scheduler():
-    """启动定时任务调度器"""
-    print("启动定时任务调度器...")
+    print("[scheduler] starting TaskScheduler...")
     scheduler = TaskScheduler()
-    scheduler.start()
+    scheduler.run_forever(interval_minutes=60)
+
 
 
 def main():
-    parser = argparse.ArgumentParser(description='WebNovel Trends - 小说热点分析系统')
-    parser.add_argument('mode', choices=['once', 'scheduler', 'tests', 'analyze'],
-                        help='运行模式: once(单次运行), scheduler(定时任务), tests(测试), analyze(仅分析)')
+    parser = argparse.ArgumentParser(description="WebNovel Trends - 小说热点分析系统")
+
+    parser.add_argument(
+        "mode",
+        choices=["once", "scheduler"],
+        help="运行模式: once(单次运行), scheduler(定时任务)",
+    )
+
+    # Rank controls (exactly as you requested)
+    parser.add_argument(
+        "--qidian_ranks",
+        default="",
+        help="起点榜单类型（逗号分隔）。默认=运行 config 里 rank_type_map 的所有榜单",
+    )
+    parser.add_argument(
+        "--qidian_pages",
+        type=int,
+        default=3,
+        help="起点每个榜单抓取页数，默认=3（约60本书）",
+    )
+    parser.add_argument(
+        "--fanqie_ranks",
+        default="",
+        help="番茄榜单类型（逗号分隔）。默认=运行 config 里 rank_type_map 的所有榜单",
+    )
+
+    # Chapters
+    parser.add_argument(
+        "--chapter_count",
+        type=int,
+        default=5,
+        help="起点/番茄：每本书抓取并存储的前N章，默认=5",
+    )
+
+    # Optional switches
+    parser.add_argument("--no_detail", action="store_true", help="禁用详情页补全")
+    parser.add_argument("--no_chapters", action="store_true", help="禁用章节抓取")
 
     args = parser.parse_args()
 
     print("WebNovel Trends 小说热点分析系统")
-    print("版本: 1.0.0")
-    print("当前时间:", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    print("=" * 60)
+    print("当前时间:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    print("=" * 70)
 
-    if args.mode == 'once':
-        run_once()
-    elif args.mode == 'scheduler':
+    if args.mode == "once":
+        run_once(
+            qidian_rank_types=_split_csv(args.qidian_ranks) or None,
+            qidian_pages=int(args.qidian_pages),
+            fanqie_rank_types=_split_csv(args.fanqie_ranks) or None,
+            chapter_count=int(args.chapter_count),
+            enrich_detail=(not args.no_detail),
+            enrich_chapters=(not args.no_chapters),
+        )
+    elif args.mode == "scheduler":
         run_scheduler()
-    elif args.mode == 'analyze':
-        pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

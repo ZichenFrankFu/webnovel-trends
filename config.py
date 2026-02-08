@@ -1,7 +1,7 @@
 import os
 
 # Root Directory
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 WEBSITES = {
     'qidian': {
@@ -378,5 +378,22 @@ CRAWLER_CONFIG = {
         'delay_between_chapters': (1.0, 3.0),
         'wait_for_content_sec': 15,
     },
+}
 
+# ------------------------------------------------------------------
+# Scheduler Configuration
+# ------------------------------------------------------------------
+SCHEDULER = {
+    # 每天运行时间（本地时间）
+    # 格式: "HH:MM"
+    "run_time": "03:30",
+
+    # 失败后的重试次数（不含首次）
+    "retry_attempts": 2,
+
+    # 重试退避时间（秒，线性递增）
+    "retry_backoff_sec": 120,
+
+    # 触发前的轻微抖动（避免卡在整点）
+    "jitter_sec": 5,
 }

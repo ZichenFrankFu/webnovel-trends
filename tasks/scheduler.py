@@ -1,185 +1,139 @@
 # tasks/scheduler.py
+from __future__ import annotations
 
-from apscheduler.schedulers.blocking import BlockingScheduler
-from apscheduler.triggers.cron import CronTrigger
-import logging
-import time
-from datetime import datetime
-import sys
 import os
+import sys
+import time
+import schedule
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, Callable
+from tasks.run_spiders_once import run_once
 
-# 添加项目根目录到Python路径
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Ensure project root import works no matter where you run from
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import WEBSITES, DATABASE, OUTPUT_PATHS
-from spiders.qidian_spider import QidianSpider
-from spiders.fanqie_spider import FanqieSpider
-from database.db_handler import DatabaseHandler
-from analysis.trend_analyzer import TrendAnalyzer
-from analysis.visualizer import DataVisualizer
+import config
+
+@dataclass
+class SchedulerConfig:
+    """
+    Daily scheduler configuration.
+
+    - run_time: local HH:MM (e.g. "03:30")
+    - retry_attempts: how many additional retries if the run fails
+    - retry_backoff_sec: base backoff seconds; actual delay is backoff * attempt_index
+    - jitter_sec: small jitter to avoid always hitting exact second
+    """
+    run_time: str = "03:30"
+    retry_attempts: int = 2
+    retry_backoff_sec: int = 120
+    jitter_sec: int = 5
+
+
+def _parse_hhmm(hhmm: str) -> tuple[int, int]:
+    hhmm = (hhmm or "").strip()
+    if ":" not in hhmm:
+        raise ValueError(f"Invalid run_time={hhmm!r}, expected 'HH:MM'")
+    h, m = hhmm.split(":", 1)
+    return int(h), int(m)
+
+
+def _next_run_at(run_time: str, now: Optional[datetime] = None) -> datetime:
+    now = now or datetime.now()
+    h, m = _parse_hhmm(run_time)
+    candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if candidate <= now:
+        candidate = candidate + timedelta(days=1)
+    return candidate
+
+
+def _sleep_until(target: datetime, *, logger: logging.Logger, jitter_sec: int = 0):
+    while True:
+        now = datetime.now()
+        remaining = (target - now).total_seconds()
+        if remaining <= 0:
+            break
+
+        # sleep in chunks so Ctrl+C reacts fast
+        chunk = min(remaining, 60)
+        time.sleep(max(0.0, chunk))
+
+    if jitter_sec > 0:
+        time.sleep(min(jitter_sec, 5))
+
+
+def _build_logger() -> logging.Logger:
+    logs_dir = PROJECT_ROOT / "outputs" / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log_path = logs_dir / "scheduler.log"
+
+    logger = logging.getLogger("webnovel_trends_scheduler")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+
+    fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+    # Console
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
+
+    # File
+    fh = logging.FileHandler(str(log_path), encoding="utf-8")
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+    logger.info(f"[scheduler] log file: {log_path}")
+    logger.info(f"[scheduler] project root: {PROJECT_ROOT}")
+    logger.info(f"[scheduler] config file: {getattr(config, '__file__', '<unknown>')}")
+    return logger
 
 
 class TaskScheduler:
-    def __init__(self):
-        self.setup_logging()
-        self.db_handler = DatabaseHandler(DATABASE['path'])
-        self.scheduler = BlockingScheduler()
+    """
+    Minimal daily scheduler.
 
-    def setup_logging(self):
-        """设置日志"""
-        log_file = os.path.join(OUTPUT_PATHS['logs'], 'scheduler.log')
+    Usage:
+      - from main.py: TaskScheduler().start()
+      - or directly: python tasks/scheduler.py --time 03:30
+    """
 
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file, encoding='utf-8'),
-                logging.StreamHandler()
-            ]
+    def __init__(self, job: Optional[Callable[[], None]] = None) -> None:
+        self.job = job or run_once
+
+    def run_once(self) -> None:
+        self.job()
+
+    def run_forever(self, interval_minutes: int = 60) -> None:
+        schedule.every(interval_minutes).minutes.do(self.job)
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+
+
+def _cli():
+    import argparse
+
+    p = argparse.ArgumentParser(description="WebNovel Trends daily scheduler")
+    p.add_argument("--time", default="03:30", help="daily run time in HH:MM (local)")
+    p.add_argument("--retries", type=int, default=2, help="retry attempts on failure")
+    p.add_argument("--backoff", type=int, default=120, help="base backoff seconds")
+    args = p.parse_args()
+
+    sched = TaskScheduler(
+        SchedulerConfig(
+            run_time=args.time,
+            retry_attempts=args.retries,
+            retry_backoff_sec=args.backoff,
         )
+    )
+    sched.start()
 
-        self.logger = logging.getLogger('TaskScheduler')
 
-    def daily_crawl_task(self):
-        """每日爬取任务"""
-        self.logger.info("开始执行每日爬取任务")
-        start_time = time.time()
-
-        try:
-            # 1. 爬取起点数据
-            self.logger.info("爬取起点中文网...")
-            qidian_spider = QidianSpider(WEBSITES['qidian'])
-            qidian_books = qidian_spider.fetch_whole_rank()
-
-            # 为前20本书补充详情
-            enriched_qidian = qidian_spider.enrich_books_with_details(qidian_books, max_books=20)
-
-            # 保存到数据库
-            for book in enriched_qidian:
-                self.db_handler.save_daily_ranking(book)
-
-            self.logger.info(f"起点数据爬取完成: {len(enriched_qidian)} 本书")
-
-            # 2. 爬取番茄数据
-            self.logger.info("爬取番茄小说...")
-            fanqie_spider = FanqieSpider(WEBSITES['fanqie'])
-            fanqie_books = fanqie_spider.fetch_whole_rank()
-
-            # 为前15本书补充详情
-            enriched_fanqie = fanqie_spider.enrich_books_with_details(fanqie_books, max_books=15)
-
-            # 保存到数据库
-            for book in enriched_fanqie:
-                self.db_handler.save_daily_ranking(book)
-
-            self.logger.info(f"番茄数据爬取完成: {len(enriched_fanqie)} 本书")
-
-            # 3. 分析数据
-            self.logger.info("开始数据分析...")
-            analyzer = TrendAnalyzer(self.db_handler)
-            trends_report = analyzer.analyze_daily_trends()
-
-            # 4. 生成可视化
-            self.logger.info("生成可视化报告...")
-            visualizer = DataVisualizer()
-            date_str = datetime.now().strftime('%Y%m%d')
-            visuals = visualizer.create_daily_report(trends_report, date_str)
-
-            # 5. 保存报告
-            report_file = os.path.join(OUTPUT_PATHS['reports'], f'daily_report_{date_str}.json')
-            import json
-            with open(report_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'report_date': datetime.now().strftime('%Y-%m-%d'),
-                    'summary': trends_report.get('summary', {}),
-                    'platforms': trends_report.get('platforms', {}),
-                    'visualizations': list(visuals.values()) if visuals else []
-                }, f, ensure_ascii=False, indent=2)
-
-            elapsed_time = time.time() - start_time
-            self.logger.info(f"每日任务完成! 耗时: {elapsed_time:.2f}秒")
-
-        except Exception as e:
-            self.logger.error(f"每日任务执行失败: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
-
-    def monthly_analysis_task(self):
-        """月度分析任务（每月1号执行）"""
-        self.logger.info("开始执行月度分析任务")
-
-        try:
-            analyzer = TrendAnalyzer(self.db_handler)
-
-            # 分析上月数据
-            last_month = (datetime.now().replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
-            monthly_report = analyzer.analyze_monthly_trends(last_month)
-
-            # 保存月度报告
-            report_file = os.path.join(OUTPUT_PATHS['reports'], f'monthly_report_{last_month}.json')
-            import json
-            with open(report_file, 'w', encoding='utf-8') as f:
-                json.dump(monthly_report, f, ensure_ascii=False, indent=2)
-
-            # 生成月度图表
-            visualizer = DataVisualizer()
-            chart_file = visualizer.create_monthly_trend_chart(monthly_report, last_month)
-
-            self.logger.info(f"月度分析完成: {report_file}")
-
-        except Exception as e:
-            self.logger.error(f"月度任务执行失败: {e}")
-
-    def quarterly_analysis_task(self):
-        """季度分析任务"""
-        self.logger.info("开始执行季度分析任务")
-
-        try:
-            # 这里可以添加季度分析逻辑
-            # 例如：比较三个月的数据，识别长期趋势
-
-            self.logger.info("季度分析完成")
-
-        except Exception as e:
-            self.logger.error(f"季度任务执行失败: {e}")
-
-    def start(self):
-        """启动调度器"""
-        self.logger.info("启动任务调度器")
-
-        # 每日凌晨2点执行爬取任务（避免高峰时段）
-        self.scheduler.add_job(
-            self.daily_crawl_task,
-            CronTrigger(hour=2, minute=0),
-            id='daily_crawl',
-            name='每日爬取任务',
-            replace_existing=True
-        )
-
-        # 每月1号凌晨3点执行月度分析
-        self.scheduler.add_job(
-            self.monthly_analysis_task,
-            CronTrigger(day=1, hour=3, minute=0),
-            id='monthly_analysis',
-            name='月度分析任务',
-            replace_existing=True
-        )
-
-        # 每季度第一天凌晨4点执行季度分析
-        self.scheduler.add_job(
-            self.quarterly_analysis_task,
-            CronTrigger(month='1,4,7,10', day=1, hour=4, minute=0),
-            id='quarterly_analysis',
-            name='季度分析任务',
-            replace_existing=True
-        )
-
-        self.logger.info("任务调度器已启动")
-        self.logger.info("当前计划任务:")
-        for job in self.scheduler.get_jobs():
-            self.logger.info(f"  - {job.name}: {job.next_run_time}")
-
-        try:
-            self.scheduler.start()
-        except (KeyboardInterrupt, SystemExit):
-            self.logger.info("任务调度器已停止")
+if __name__ == "__main__":
+    _cli()
