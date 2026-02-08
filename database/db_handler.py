@@ -811,6 +811,27 @@ class DatabaseHandler:
 
         return int(self._run_with_retry(_do))
 
+    def upsert_title_alias_by_uid(
+            self,
+            *,
+            novel_uid: int,
+            title: str,
+            snapshot_date: Any,
+            make_primary: bool = False,
+    ) -> None:
+        """为指定 novel_uid 追加一个 title（写入 novel_titles）。"""
+        t = (title or "").strip()
+        if not novel_uid or not t:
+            return
+
+        snap = _date_str(snapshot_date)
+
+        def _do() -> None:
+            with self._tx(immediate=True) as conn:
+                self._upsert_novel_title(conn, int(novel_uid), t, snap, make_primary=make_primary)
+
+        self._run_with_retry(_do)
+
     # --------------------------
     # public: query First_N_chapters
     # --------------------------
@@ -920,3 +941,55 @@ class DatabaseHandler:
             import traceback
             self.logger.error(f"详细错误: {traceback.format_exc()}")
             return None
+
+    def find_existing_novel_uid(
+            self,
+            *,
+            platform: str,
+            platform_novel_id: str = "",
+            url: str = "",
+            author: str = "",
+            intro: str = "",
+    ) -> Optional[int]:
+        """
+        判定是否已存储过“同一本书”。
+
+        优先级：
+          1) (platform, platform_novel_id)  —— 最强
+          2) (platform, url)                —— 次强（番茄改名但url/id一般稳定）
+          3) (platform, author_norm, intro_norm) —— 兜底（你要求的组合）
+        """
+        pid = (platform_novel_id or "").strip()
+        u = (url or "").strip()
+        a_norm = normalize_text(author or "")
+        i_norm = normalize_text(intro or "")
+
+        def _do() -> Optional[int]:
+            with self._tx(immediate=False) as conn:
+                if pid:
+                    row = conn.execute(
+                        "SELECT novel_uid FROM novels WHERE platform=? AND platform_novel_id=? LIMIT 1",
+                        (platform, pid),
+                    ).fetchone()
+                    if row:
+                        return int(row["novel_uid"])
+
+                if u:
+                    row = conn.execute(
+                        "SELECT novel_uid FROM novels WHERE platform=? AND url=? LIMIT 1",
+                        (platform, u),
+                    ).fetchone()
+                    if row:
+                        return int(row["novel_uid"])
+
+                if a_norm and i_norm:
+                    row = conn.execute(
+                        "SELECT novel_uid FROM novels WHERE platform=? AND author_norm=? AND intro_norm=? LIMIT 1",
+                        (platform, a_norm, i_norm),
+                    ).fetchone()
+                    if row:
+                        return int(row["novel_uid"])
+
+            return None
+
+        return self._run_with_retry(_do)

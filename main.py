@@ -46,8 +46,8 @@ def main():
     parser.add_argument(
         "--qidian_pages",
         type=int,
-        default=3,
-        help="起点每个榜单抓取页数，默认=3（约60本书）",
+        default=2,
+        help="起点每个榜单抓取页数，默认=2（约40本书）",
     )
     parser.add_argument(
         "--fanqie_ranks",

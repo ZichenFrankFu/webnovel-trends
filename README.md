@@ -19,8 +19,13 @@
 
 ---
 
-## 2. Structure
-### 2.1 Project Directory Structure
+## 2. Spider一键启动
+```bash
+python main.py once
+```
+
+## 3. Structure
+### 3.1 Project Directory Structure
 ```text
 webnovel_trends/
 ├── analysis/
@@ -53,7 +58,7 @@ webnovel_trends/
 └── DB_Doc.md                # 数据库说明
 ```
 
-### 2.2 Database Structure (ER-Diagram)
+### 3.2 Database Structure (ER-Diagram)
 ```mermaid
 erDiagram
   NOVELS ||--o{ NOVEL_TITLES : "novel_uid"
@@ -141,42 +146,42 @@ erDiagram
   }
 ```
 
-#### 2.2.1 [详细数据库信息](DB_Doc.md)
+#### 3.2.1 [详细数据库信息](DB_Doc.md)
 
 ---
 
 
-## 3. 快捷方式
-### 3.1. 安装依赖
+## 4. 快捷方式
+### 4.1. 安装依赖
 ```bash
 pip install -r requirements.txt
 ```
-### 3.2. qidian_test
-#### 3.2.1 快速测试（抓取一个榜单的第一本小说，获取该小说的 metadata + 第一章，不写库，用于快速验证 HTML 结构是否发生变化）
+### 4.2. qidian_test
+#### 4.2.1 快速测试（抓取一个榜单的第一本小说，获取该小说的 metadata + 第一章，不写库，用于快速验证 HTML 结构是否发生变化）
 ```bash 
 python tests/qidian_test.py --test quick --rank_key "月票榜"
 ```
-#### 3.2.2 完整测试（抓取一个榜单的前三本小说及其 metadata，抓取每本小说前5章正文，写入测试数据库）
+#### 4.2.2 完整测试（抓取一个榜单的前三本小说及其 metadata，抓取每本小说前5章正文，写入测试数据库）
 ```bash 
 python tests/qidian_test.py --test full --rank_key "月票榜"
 ```
-#### 3.2.3 测试多个榜单（按多个榜单循环抓取，默认每榜单抓1本小说，并保存每本小说前3章正文）
+#### 4.2.3 测试多个榜单（按多个榜单循环抓取，默认每榜单抓1本小说，并保存每本小说前3章正文）
 ```bash
 python tests/qidian_test.py --test multi_ranks --rank_keys "月票榜,畅销榜,推荐榜"
 ```
-#### 3.3.4 智能补全测试（只测试抓取，不写入数据库）
+#### 4.2.4 智能补全测试（只测试抓取，不写入数据库）
 ```bash
 python tests/qidian_test.py --test smart_fetch --rank_key "月票榜" --pages 1 --chapter_n1 3 --chapter_n2 5
 ```
-#### 3.2.5 qidian_test Args
-##### 3.2.5.1 Test Modes (--test)
+#### 4.2.5 qidian_test Args
+##### 4.2.5.1 Test Modes (--test)
 | test value | 说明 |
 |-----------|------|
 | `quick` | 快速 HTML 结构检测（不写库） |
 | `full` | 单榜单完整流程测试（写库） |
 | `multi_ranks` | 多榜单循环测试（写库） |
 
-##### 3.2.5.2 Common Arguments
+##### 4.2.5.2 Common Arguments
 这些参数在不同测试模式下可选，未提供时会使用默认值
 
 | 参数 | 类型 | 说明 | 默认值 |
@@ -190,29 +195,33 @@ python tests/qidian_test.py --test smart_fetch --rank_key "月票榜" --pages 1 
 
 当 chapter_n > 0 时，将触发章节抓取与写库逻辑
 
-### 3.3. fanqie_test
-#### 3.3.1 测试反爬字体解密（仅番茄）
+### 4.3. fanqie_test
+#### 4.3.1 测试反爬字体解密（仅番茄）
 ```bash
 python tests/fanqie_test.py --test decryption
 ```
-#### 3.3.2 快速测试（抓取一个榜单的第一本小说，获取该小说的 metadata + 第一章，不写库，用于快速验证 HTML 结构是否发生变化）
+#### 4.3.2 快速测试（抓取一个榜单的第一本小说，获取该小说的 metadata + 第一章，不写库，用于快速验证 HTML 结构是否发生变化）
 ```bash
 python tests/fanqie_test.py --test quick --rank_key "阅读榜科幻末世"
 ```
-#### 3.3.3 完整测试（顺序执行所有测试类型, 覆盖：榜单、详情、章节、智能补全、去重、字体解密、多榜单, 写入测试数据库）
+#### 4.3.3 完整测试（顺序执行所有测试类型, 覆盖：榜单、详情、章节、智能补全、去重、字体解密、多榜单, 写入测试数据库）
 ```bash
 python tests/fanqie_test.py --test full --rank_key "阅读榜科幻末世"
 ```
-#### 3.3.4 测试多个榜单
+#### 4.3.4 测试多个榜单
 ```bash
 python tests/fanqie_test.py --test multi_ranks --rank_keys "阅读榜西方奇幻,阅读榜科幻末世,新书榜西方奇幻"
 ```
-#### 3.3.5 智能补全测试（只测试抓取，不写入数据库）
+#### 4.3.5 智能补全测试（只测试抓取，不写入数据库）
 ```bash
 python tests/fanqie_test.py --test smart_fetch --rank_key "阅读榜西方奇幻" --pages 1 --chapter_n1 3 --chapter_n2 5
 ```
-#### 3.3.6 fanqie_test Args
-##### 3.3.6.1 Test Modes (`--test`)
+#### 4.3.6 小说改名测试
+```bash
+python tests/fanqie_test.py --test fake_rename
+```
+#### 4.3.7 fanqie_test Args
+##### 4.3.7.1 Test Modes (`--test`)
 | test value | 说明 |
 |-----------|------|
 | `decryption` | 仅测试番茄小说字体 / 数字解密模块 |
@@ -220,7 +229,7 @@ python tests/fanqie_test.py --test smart_fetch --rank_key "阅读榜西方奇幻
 | `full` | 单榜单完整流程测试（写库） |
 | `multi_ranks` | 多榜单循环测试（写库） |
 
-##### 3.3.6.2 Common Arguments
+##### 4.3.7.2 Common Arguments
 这些参数在不同测试模式下可选，未提供时会使用默认值
 
 | 参数 | 类型 | 说明                           | 默认值 |
@@ -234,8 +243,8 @@ python tests/fanqie_test.py --test smart_fetch --rank_key "阅读榜西方奇幻
 
 当 chapter_n > 0 时，将触发章节抓取与写库逻辑。
 
-## 4. 额外信息
-### 4.1 起点榜单信息
+## 5. 额外信息
+### 5.1 起点榜单信息
 ```text
 新书榜说明
 新书榜有四个，分别为：签约作者新书榜、公众作者新书榜、新人签约新书榜、新人作者新书榜。 以上榜单不会同时收录同一部作品。
@@ -248,7 +257,7 @@ python tests/fanqie_test.py --test smart_fetch --rank_key "阅读榜西方奇幻
 ```
 Source: https://www.qidian.com/help/index/6
 
-### 4.2 番茄榜单信息
+### 5.2 番茄榜单信息
 ```text
 榜单说明
 作品按照其在番茄小说中的分类进行划分排榜，排榜顺序按照在读数据排序，仅排1000在读以上的作品

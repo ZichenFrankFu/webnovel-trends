@@ -594,6 +594,181 @@ def run_smart_fetch(*, rank_key: str, pages: int, chapter_n1: int, chapter_n2: i
         except Exception:
             pass
 
+def run_fake_same_novel_rename_test():
+    """
+    Fake input test:
+    - same platform_novel_id (and same author/intro/url), but different title
+    - expect: novels=1, novel_titles=2, and latest title becomes primary
+    - also test chapters upsert: first 2 then 4 => count grows to 4, max=4
+    """
+    print("\n================================================================================")
+    print("[Test] fake_rename - 同小说不同书名（不访问网站，纯 DB fake input）")
+    print("================================================================================")
+
+    db_path = _ensure_clean_dirs()
+    db = _init_test_db(db_path)
+
+    snapshot_date = "2026-02-08"
+    platform_novel_id = "fanqie_123456"
+    url = "https://fanqie.example/book/123456"
+    author = "某作者"
+    intro = "这是一本会改名的书，简介保持不变，用于测试去重与书名别名。"
+
+    # 第一次：旧书名
+    items_v1 = [{
+        "platform": "fanqie",
+        "platform_novel_id": platform_novel_id,
+        "title": "旧书名：风起云涌",
+        "author": author,
+        "intro": intro,
+        "main_category": "科幻",
+        "tags": ["科幻", "末世"],
+        "status": "ongoing",
+        "total_words": 123456,
+        "url": url,
+        "rank": 1,
+        "reading_count": 1111,
+    }]
+
+    # 第二次：新书名（同一本书）
+    items_v2 = [{
+        "platform": "fanqie",
+        "platform_novel_id": platform_novel_id,
+        "title": "新书名：云涌风起",
+        "author": author,
+        "intro": intro,
+        "main_category": "科幻",
+        "tags": ["科幻", "末世"],
+        "status": "ongoing",
+        "total_words": 123999,
+        "url": url,
+        "rank": 1,
+        "reading_count": 2222,
+    }]
+
+    # 写入两次 snapshot（会触发 novels upsert + novel_titles upsert）
+    db.save_rank_snapshot(
+        platform="fanqie",
+        rank_family="fake_rank",
+        rank_sub_cat="",
+        snapshot_date=snapshot_date,
+        items=items_v1,
+        source_url="",
+        make_title_primary=True,
+    )
+
+    db.save_rank_snapshot(
+        platform="fanqie",
+        rank_family="fake_rank",
+        rank_sub_cat="",
+        snapshot_date=snapshot_date,
+        items=items_v2,
+        source_url="",
+        make_title_primary=True,
+    )
+
+    # 断言：novels=1，novel_titles=2
+    counts = db.get_table_counts()
+    print("\n[db] table counts after rename writes:")
+    for k, v in counts.items():
+        print(f"  - {k}: {v}")
+
+    assert counts["novels"] == 1, f"Expected novels=1, got {counts['novels']}"
+    assert counts["novel_titles"] == 2, f"Expected novel_titles=2, got {counts['novel_titles']}"
+
+    # 进一步断言：primary title 应该是第二次的新书名（make_title_primary=True）
+    with db._tx(immediate=False) as conn:
+        row = conn.execute(
+            """
+            SELECT nt.title
+            FROM novels n
+            JOIN novel_titles nt ON n.novel_uid = nt.novel_uid
+            WHERE n.platform=? AND n.platform_novel_id=? AND nt.is_primary=1
+            LIMIT 1
+            """,
+            ("fanqie", platform_novel_id),
+        ).fetchone()
+
+        primary_title = row["title"] if row else None
+
+        titles = conn.execute(
+            """
+            SELECT nt.title, nt.is_primary
+            FROM novels n
+            JOIN novel_titles nt ON n.novel_uid = nt.novel_uid
+            WHERE n.platform=? AND n.platform_novel_id=?
+            ORDER BY nt.title_id ASC
+            """,
+            ("fanqie", platform_novel_id),
+        ).fetchall()
+
+    print("\n[titles] stored titles:")
+    for r in titles:
+        print(f"  - title={r['title']} | is_primary={r['is_primary']}")
+
+    assert primary_title == "新书名：云涌风起", f"Expected primary title to be new title, got {primary_title}"
+
+    # ------------------------------------------------------------
+    # 章节 fake upsert：先 2 章，再 4 章
+    # ------------------------------------------------------------
+    chapters_2 = [
+        {"chapter_num": 1, "chapter_title": "第1章", "chapter_content": "内容1", "chapter_url": url + "/c1", "word_count": 3},
+        {"chapter_num": 2, "chapter_title": "第2章", "chapter_content": "内容2", "chapter_url": url + "/c2", "word_count": 3},
+    ]
+    chapters_4 = [
+        {"chapter_num": 1, "chapter_title": "第1章", "chapter_content": "内容1(更新版)", "chapter_url": url + "/c1", "word_count": 6},
+        {"chapter_num": 2, "chapter_title": "第2章", "chapter_content": "内容2", "chapter_url": url + "/c2", "word_count": 3},
+        {"chapter_num": 3, "chapter_title": "第3章", "chapter_content": "内容3", "chapter_url": url + "/c3", "word_count": 3},
+        {"chapter_num": 4, "chapter_title": "第4章", "chapter_content": "内容4", "chapter_url": url + "/c4", "word_count": 3},
+    ]
+
+    # 第一次写 2 章
+    db.upsert_first_n_chapters(
+        platform="fanqie",
+        platform_novel_id=platform_novel_id,
+        publish_date=snapshot_date,
+        chapters=chapters_2,
+        novel_fallback_fields={
+            "title": "旧书名：风起云涌",
+            "author": author,
+            "intro": intro,
+            "main_category": "科幻",
+            "status": "ongoing",
+            "total_words": 0,
+            "url": url,
+            "tags": ["科幻", "末世"],
+        },
+    )
+
+    c1 = db.get_first_n_chapter_count(platform="fanqie", platform_novel_id=platform_novel_id)
+    m1 = db.get_first_n_chapter_max_num(platform="fanqie", platform_novel_id=platform_novel_id)
+    print(f"\n[chapters] after first upsert: count={c1}, max={m1}")
+    assert c1 == 2 and m1 == 2, f"Expected count=2,max=2; got count={c1},max={m1}"
+
+    # 第二次写 4 章（包含前两章，且第1章内容更新）
+    db.upsert_first_n_chapters(
+        platform="fanqie",
+        platform_novel_id=platform_novel_id,
+        publish_date=snapshot_date,
+        chapters=chapters_4,
+        novel_fallback_fields={
+            "title": "新书名：云涌风起",
+            "author": author,
+            "intro": intro,
+            "main_category": "科幻",
+            "status": "ongoing",
+            "total_words": 0,
+            "url": url,
+            "tags": ["科幻", "末世"],
+        },
+    )
+
+    c2 = db.get_first_n_chapter_count(platform="fanqie", platform_novel_id=platform_novel_id)
+    m2 = db.get_first_n_chapter_max_num(platform="fanqie", platform_novel_id=platform_novel_id)
+    print(f"[chapters] after second upsert: count={c2}, max={m2}")
+    assert c2 == 4 and m2 == 4, f"Expected count=4,max=4; got count={c2},max={m2}"
+
+    print("\n fake_rename test passed.")
 
 
 # ------------------------------------------------------------------
@@ -603,11 +778,11 @@ def run_smart_fetch(*, rank_key: str, pages: int, chapter_n1: int, chapter_n2: i
 def main():
     rank_choices = _get_rank_choices()
 
-    parser = argparse.ArgumentParser(description="Fanqie Spider Test Suite (refined 4 modes)")
+    parser = argparse.ArgumentParser(description="Fanqie Spider Test Suite")
     parser.add_argument(
         "--test",
         required=True,
-        choices=["decryption", "quick", "full", "multi_ranks", "smart_fetch"],
+        choices=["decryption", "quick", "full", "multi_ranks", "smart_fetch", "fake_rename"],
         help="Test mode: decryption | quick | full | multi_ranks",
     )
 
@@ -659,6 +834,10 @@ def main():
 
     if args.test == "decryption":
         run_decryption(verbose=args.verbose)
+        return
+
+    if args.test == "fake_rename":
+        run_fake_same_novel_rename_test()
         return
 
 

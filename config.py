@@ -195,6 +195,7 @@ WEBSITES = {
             "阅读榜悬疑脑洞": {"rank_family": "阅读榜", "rank_sub_cat": "悬疑脑洞"},
             "阅读榜都市脑洞": {"rank_family": "阅读榜", "rank_sub_cat": "都市脑洞"},
             "阅读榜动漫衍生": {"rank_family": "阅读榜", "rank_sub_cat": "动漫衍生"},
+            # 新书榜
             "新书榜西方奇幻": {"rank_family": "新书榜", "rank_sub_cat": "西方奇幻"},
             "新书榜科幻末世": {"rank_family": "新书榜", "rank_sub_cat": "科幻末世"},
             "新书榜都市高武": {"rank_family": "新书榜", "rank_sub_cat": "都市高武"},
@@ -378,6 +379,19 @@ CRAWLER_CONFIG = {
         'delay_between_chapters': (1.0, 3.0),
         'wait_for_content_sec': 15,
     },
+    # 章节抓取策略
+    "chapter_policy": {
+        "default": 5,
+        # 新书榜默认只抓前 N 章
+        "new_book_chapter_count": 2,
+    },
+    "page_fetch_overrides": {
+        # 每 N 次 driver.get 重启一次
+        "restart_driver_every_n_get": 200,
+        # 每个榜单跑完就重启一次
+        "restart_driver_each_rank": True,
+    },
+
 }
 
 # ------------------------------------------------------------------
@@ -386,7 +400,7 @@ CRAWLER_CONFIG = {
 SCHEDULER = {
     # 每天运行时间（本地时间）
     # 格式: "HH:MM"
-    "run_time": "03:30",
+    "run_time": "19:30",
 
     # 失败后的重试次数（不含首次）
     "retry_attempts": 2,

@@ -17,6 +17,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import InvalidSessionIdException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import config
@@ -249,11 +250,11 @@ class BaseSpider(ABC):
 
         Config defaults read from:
           CRAWLER_CONFIG.page_fetch + site_config.page_fetch_overrides
-        """
-        if not self.driver:
-            self.logger.error("Selenium driver not initialized")
-            return None
 
+        New:
+          - driver.get counter + periodic restart (restart_driver_every_n_get)
+          - auto restart on invalid session id
+        """
         # ---- config defaults (global + site override) ----
         crawler_cfg = getattr(self.config, "CRAWLER_CONFIG", {}) or {}
         global_fetch = (crawler_cfg.get("page_fetch", {}) or {})
@@ -271,10 +272,65 @@ class BaseSpider(ABC):
         min_html_length = int(cfg.get("min_html_length", 800))
         bad_title_keywords = cfg.get("bad_title_keywords", ["404", "无法访问", "出错了"])
 
+        # periodic restart knobs (default: off)
+        restart_every_n_get = int(cfg.get("restart_driver_every_n_get", 0) or 0)
+
+        # -------- driver lifecycle helpers (local closure, no need to modify other functions) --------
+        def _driver_is_alive() -> bool:
+            try:
+                d = getattr(self, "driver", None)
+                if d is None:
+                    return False
+                sid = getattr(d, "session_id", None)
+                if not sid:
+                    return False
+                _ = d.current_url  # light ping
+                return True
+            except Exception:
+                return False
+
+        def _restart_driver(reason: str) -> None:
+            try:
+                if getattr(self, "driver", None) is not None:
+                    try:
+                        self.driver.quit()
+                    except Exception:
+                        pass
+            finally:
+                self.driver = None
+
+            self.logger.warning(f"[Selenium] restart driver. reason={reason}")
+            try:
+                self._init_driver()
+            except Exception as e:
+                self.logger.error(f"[Selenium] driver init failed after restart. error={e}")
+                # init 失败就让后续尝试继续触发重试逻辑
+                self.driver = None
+
+        def _ensure_driver_ready(reason: str) -> bool:
+            if _driver_is_alive():
+                return True
+            _restart_driver(reason=reason)
+            return _driver_is_alive()
+
+        # -------- initial ensure --------
+        if not _ensure_driver_ready(reason="driver not initialized / not alive before _get_soup"):
+            self.logger.error("Selenium driver not initialized (restart failed)")
+            return None
+
         total_attempts = _max_retries + 1
 
         for attempt in range(1, total_attempts + 1):
             try:
+                # periodic restart BEFORE navigation (avoid dying mid-get)
+                if restart_every_n_get > 0:
+                    counter = int(getattr(self, "_driver_get_counter", 0) or 0)
+                    if counter > 0 and (counter % restart_every_n_get == 0):
+                        _restart_driver(
+                            reason=f"periodic restart: every {restart_every_n_get} gets (counter={counter})")
+                        if not _ensure_driver_ready(reason="driver not alive after periodic restart"):
+                            raise RuntimeError("driver not available after periodic restart")
+
                 self.logger.info(f"[页面获取] 尝试 {attempt}/{total_attempts}: {url}")
 
                 # page load
@@ -283,7 +339,12 @@ class BaseSpider(ABC):
                 except Exception:
                     pass
 
+                # ---- critical: driver.get ----
                 self.driver.get(url)
+
+                # get counter increments ONLY after get() succeeds (no exception thrown)
+                self._driver_get_counter = int(getattr(self, "_driver_get_counter", 0) or 0) + 1
+
                 self._humanlike_sleep(post_load_delay[0], post_load_delay[1])
 
                 # optional wait css
@@ -324,6 +385,31 @@ class BaseSpider(ABC):
 
                 return soup
 
+            except (InvalidSessionIdException, WebDriverException) as e:
+                msg = str(e).lower()
+                # invalid session 是“driver 死亡”，必须重启而不是 refresh
+                if "invalid session id" in msg or isinstance(e, InvalidSessionIdException):
+                    self.logger.warning(
+                        f"[页面获取] 失败 {attempt}/{total_attempts}: {url} ; error=invalid session id -> restart driver"
+                    )
+                    _restart_driver(reason="invalid session id during fetch")
+                    time.sleep(_retry_delay)
+                    continue
+
+                # 其他 webdriver 异常：按原逻辑退避 + refresh（尽量保持你的行为不变）
+                self.logger.warning(f"[页面获取] 失败 {attempt}/{total_attempts}: {url} ; error={e}")
+
+                if attempt >= total_attempts:
+                    self.logger.error(f"[页面获取] 所有尝试都失败: {url}")
+                    return None
+
+                time.sleep(_retry_delay)
+                try:
+                    self.driver.refresh()
+                except Exception:
+                    pass
+                continue
+
             except Exception as e:
                 self.logger.warning(f"[页面获取] 失败 {attempt}/{total_attempts}: {url} ; error={e}")
 
@@ -355,6 +441,32 @@ class BaseSpider(ABC):
     """_get_soup Hook: site-specific html processing (e.g., decrypt)"""
     def _postprocess_html(self, html: str) -> str:
         return html
+
+    def restart_driver_after_rank(self, rank_type: str = "") -> None:
+        """
+        Call this at the end of processing one rank list (e.g., in QidianSpider.fetch_whole_rank loop).
+        Controlled by config: page_fetch_overrides.restart_driver_each_rank (default False).
+        """
+        crawler_cfg = getattr(self.config, "CRAWLER_CONFIG", {}) or {}
+        global_fetch = (crawler_cfg.get("page_fetch", {}) or {})
+        site_fetch = (self.site_config or {}).get("page_fetch_overrides", {}) or {}
+        cfg = {**global_fetch, **site_fetch}
+
+        restart_each_rank = bool(cfg.get("restart_driver_each_rank", False))
+        if not restart_each_rank:
+            return
+
+        try:
+            if getattr(self, "driver", None) is not None:
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+        finally:
+            self.driver = None
+
+        self.logger.warning(f"[Selenium] restart driver after rank. rank_type={rank_type}")
+        self._init_driver()
 
     # ------------------------------------------------------------------
     # Fetch Fallback Logic (当rank page获取信息失败时，在detail page补全信息）
@@ -690,6 +802,33 @@ class BaseSpider(ABC):
             return True
 
         return False
+
+    def _driver_is_alive(self) -> bool:
+        try:
+            d = getattr(self, "driver", None)
+            if d is None:
+                return False
+            # session_id 为空通常意味着 quit 过
+            sid = getattr(d, "session_id", None)
+            if not sid:
+                return False
+            # 轻量探测：访问 current_url 会触发与 driver 的通信
+            _ = d.current_url
+            return True
+        except Exception:
+            return False
+
+    def _restart_driver(self, reason: str = "") -> None:
+        try:
+            if getattr(self, "driver", None) is not None:
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+        finally:
+            self.driver = None
+        self.logger.warning(f"[Selenium] restart driver. reason={reason}".strip())
+        self._init_driver()
 
     # ------------------------------------------------------------------
     # Database Operations

@@ -2352,14 +2352,34 @@ class QidianSpider(BaseSpider):
     # BaseSpider API: fetch_whole_ranks, 一键启动
     # ------------------------------------------------------------------
     """Fetch all configured rank lists and return a flattened list of items"""
-    def fetch_whole_rank(self):
+    def fetch_whole_rank(self) -> List[Dict[str, Any]]:
+        """Fetch all configured rank lists and return a flattened list of items."""
         all_books: List[Dict[str, Any]] = []
-        for rank_type in (self.site_config.get("rank_urls") or {}):
+
+        rank_urls = self.site_config.get("rank_urls") or {}
+        for rank_type in rank_urls.keys():
             try:
                 books = self.fetch_rank_list(rank_type)
                 all_books.extend(books)
+
+                # 保存原始数据
                 if hasattr(self, "_save_raw_data"):
-                    self._save_raw_data(books, f"{self.name}_{rank_type}_{time.strftime('%Y%m%d')}.json")
+                    try:
+                        self._save_raw_data(
+                            books,
+                            f"{self.name}_{rank_type}_{time.strftime('%Y%m%d')}.json"
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"保存raw数据失败 rank={rank_type}: {e}")
+
             except Exception as e:
-                self.logger.error(f"抓取{rank_type}榜失败: {e}")
+                self.logger.error(f"抓取 {rank_type} 榜失败: {e}")
+
+            finally:
+                # 无论成功/失败，都在本榜单结束后执行 driver 生命周期策略
+                try:
+                    self.restart_driver_after_rank(rank_type)
+                except Exception as e:
+                    self.logger.warning(f"restart_driver_after_rank failed rank={rank_type}: {e}")
+
         return all_books

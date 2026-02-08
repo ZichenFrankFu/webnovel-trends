@@ -309,7 +309,7 @@ class FanqieSpider(BaseSpider):
             except Exception:
                 pass
 
-            self._humanlike_sleep(0.8, 1.5)
+            self._humanlike_sleep(1, 3)
 
     # ------------------------------------------------------------------
     # Rank parsing
@@ -1011,6 +1011,52 @@ class FanqieSpider(BaseSpider):
     # ------------------------------------------------------------------
     # Enrichment
     # ------------------------------------------------------------------
+    def _reconcile_same_book_and_title(self, book: Dict[str, Any]) -> Optional[int]:
+        """
+        番茄改名常见：用作者/简介/url(platform_id) 判定是否已入库。
+        若已入库且 title 是新名字：追加到 novel_titles（不强制设为 primary）。
+        返回已存在的 novel_uid（若能找到），否则 None。
+        """
+        if not self.db_handler or not hasattr(self.db_handler, "find_existing_novel_uid"):
+            return None
+
+        pid = (book.get("platform_novel_id") or book.get("novel_id") or "").strip()
+        url = (book.get("url") or "").strip()
+        author = (book.get("author") or "").strip()
+        intro = (book.get("intro") or "").strip()
+        title = (book.get("title") or "").strip()
+
+        novel_uid = None
+        try:
+            novel_uid = self.db_handler.find_existing_novel_uid(
+                platform="fanqie",
+                platform_novel_id=pid,
+                url=url,
+                author=author,
+                intro=intro,
+            )
+        except Exception as e:
+            self.logger.debug(f"[dedup] find_existing_novel_uid failed: {e}")
+            return None
+
+        if not novel_uid:
+            return None
+
+        # 已存在：追加新 title（只追加，不抢 primary；primary 仍由 snapshot 的 make_title_primary 决定）
+        if title and hasattr(self.db_handler, "upsert_title_alias_by_uid"):
+            try:
+                self.db_handler.upsert_title_alias_by_uid(
+                    novel_uid=int(novel_uid),
+                    title=title,
+                    snapshot_date=self._today_str(),
+                    make_primary=False,
+                )
+                self.logger.info(f"[dedup] same book detected uid={novel_uid}; title alias upserted: {title}")
+            except Exception as e:
+                self.logger.debug(f"[dedup] upsert_title_alias_by_uid failed uid={novel_uid}: {e}")
+
+        return int(novel_uid)
+
     def enrich_rank_items(
         self,
         items: Sequence[Dict[str, Any]],
@@ -1093,13 +1139,14 @@ class FanqieSpider(BaseSpider):
                         enriched["reading_count"] = int(detail["reading_count"])
 
             if fetch_chapters:
+                _ = self._reconcile_same_book_and_title(enriched)
                 chapters = self.fetch_first_n_chapters(enriched.get("url", ""), target_chapter_count=chapter_count)
                 if chapters:
                     enriched["first_n_chapters"] = chapters
                     self.logger.info(f"[数据补完] 《{title}》 获取到 {len(chapters)} 章内容")
 
             out.append(enriched)
-            self._humanlike_sleep(0.8, 1.8)
+            self._humanlike_sleep(1, 3)
 
         return out
 
@@ -1233,14 +1280,14 @@ class FanqieSpider(BaseSpider):
         }
 
     def fetch_whole_rank(
-        self,
-        *,
-        pages: Optional[int] = None,
-        enrich_detail: bool = True,
-        enrich_chapters: bool = False,
-        chapter_count: Optional[int] = None,
-        snapshot_date: Optional[str] = None,
-        max_books: int = 200,
+            self,
+            *,
+            pages: Optional[int] = None,
+            enrich_detail: bool = True,
+            enrich_chapters: bool = False,
+            chapter_count: Optional[int] = None,
+            snapshot_date: Optional[str] = None,
+            max_books: int = 200,
     ) -> List[Dict[str, Any]]:
         all_books: List[Dict[str, Any]] = []
 
@@ -1249,7 +1296,17 @@ class FanqieSpider(BaseSpider):
             self.logger.warning("site_config.rank_urls is empty; nothing to fetch.")
             return all_books
 
-        for rank_type in rank_urls:
+        crawler_cfg = getattr(self.config, "CRAWLER_CONFIG", {}) or {}
+        global_fetch = (crawler_cfg.get("page_fetch", {}) or {})
+        site_fetch = (self.site_config or {}).get("page_fetch_overrides", {}) or {}
+        cfg = {**global_fetch, **site_fetch}
+
+        between_rank_sleep = cfg.get("between_rank_sleep_range", None)
+        if not isinstance(between_rank_sleep, (list, tuple)) or len(between_rank_sleep) != 2:
+            # 保留你原来的默认值（不强求你改 config）
+            between_rank_sleep = (1, 3)
+
+        for rank_type in rank_urls.keys():
             try:
                 self.logger.info(f"[一键启动] 开始处理榜单: {rank_type}")
 
@@ -1270,12 +1327,24 @@ class FanqieSpider(BaseSpider):
                     try:
                         fname = f"{self.name}_{rank_type}_{time.strftime('%Y%m%d')}.json"
                         self._save_raw_data(items, fname)
-                    except Exception:
-                        pass
-
-                self._humanlike_sleep(0.8, 1.8)
+                    except Exception as e:
+                        self.logger.warning(f"[一键启动] 保存 raw 数据失败 rank={rank_type}: {e}")
 
             except Exception as e:
                 self.logger.error(f"[一键启动] 处理榜单 {rank_type} 失败: {e}")
+
+            finally:
+                # 无论成功/失败，都执行 driver 生命周期策略（由 config 控制是否真的重启）
+                try:
+                    if hasattr(self, "restart_driver_after_rank"):
+                        self.restart_driver_after_rank(rank_type)
+                except Exception as e:
+                    self.logger.warning(f"[一键启动] restart_driver_after_rank failed rank={rank_type}: {e}")
+
+                # 榜单间隔（降低风控/降低 driver 压力）
+                try:
+                    self._humanlike_sleep(float(between_rank_sleep[0]), float(between_rank_sleep[1]))
+                except Exception:
+                    pass
 
         return all_books
