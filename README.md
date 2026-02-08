@@ -19,9 +19,20 @@
 
 ---
 
-## 2. Spider一键启动
+## 2. Spider
+### 2.1. 一键启动，爬取起点 + 番茄，全部榜单
 ```bash
 python main.py once
+```
+### 2.2. 只抓取某个平台 + 某个榜单
+```bash
+python main.py once --platform qidian --rank_key 月票榜 --qidian_pages 5 --chapter_count 5
+python main.py once --platform fanqie --rank_key 阅读榜西方奇幻 --chapter_count 5
+```
+### 2.3. 只抓某个平台（跑该平台所有榜单）
+```bash
+python main.py once --platform qidian --qidian_pages 2
+python main.py once --platform fanqie
 ```
 
 ## 3. Structure

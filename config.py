@@ -394,6 +394,41 @@ CRAWLER_CONFIG = {
 
 }
 
+# config.py 中添加
+ANTI_BLOCK_CONFIG = {
+    'proxy': {
+        'enabled': True,  # 根据需求开启
+        'type': 'file',
+        'path': 'proxies.txt',
+        'rotate_after': 10,
+        'timeout': 10
+    },
+    'user_agent': {
+        'enabled': True,
+        'rotate_after': 5
+    },
+    'throttler': {
+        'min_delay': 1.5,
+        'max_delay': 3.5,
+        'random_factor': 0.3,
+        'burst_detection': True,
+        'burst_threshold': 5,
+        'burst_cooldown': 15.0
+    },
+    'block_detector': {
+        'enabled': True,
+        'block_keywords': [
+            "验证码", "访问频繁", "禁止访问", "403", "404", "出错了",
+            "访问受限", "安全验证", "请输入验证码", "账号异常",
+            "您的访问过于频繁", "请稍后再试"
+        ],
+        'status_codes': [403, 429, 503, 418],
+        'retry_on_block': True,
+        'max_block_retries': 5,
+        'cooldown_on_block': 30.0
+    }
+}
+
 # ------------------------------------------------------------------
 # Scheduler Configuration
 # ------------------------------------------------------------------
