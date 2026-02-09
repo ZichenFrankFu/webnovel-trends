@@ -225,9 +225,8 @@ WEBSITES = {
                 'wait_css_required': True,
                 'min_html_length': 1200,
             },
-
-
-
+            'use_proxy': False,
+            'headless': False,
         },
         # Fanqie Rank 页主来源字段
         "rank_fields_primary": [
@@ -301,9 +300,29 @@ SELENIUM_CONFIG = {
         'disable_gpu': True,
         'window_size': '1920,1080',
         'disable_blink_features': 'AutomationControlled',
-        'user_agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                       'AppleWebKit/537.36 (KHTML, like Gecko) '
-                       'Chrome/120.0.0.0 Safari/537.36'),
+        'user_agent': [
+            # 现代Chrome (Windows)
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+
+            # 现代Chrome (Mac)
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+
+            # 现代Firefox
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/121.0",
+
+            # Edge
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+
+            # Safari
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+
+            # 移动端
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            "Mozilla/5.0 (Linux; Android 14; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.210 Mobile Safari/537.36",
+        ],
     },
 
     # 实验性选项
@@ -356,6 +375,29 @@ CRAWLER_CONFIG = {
     'cache_enabled': True,
     'cache_expiry': 3600,
 
+    # 反爬代理
+    'use_proxy': True,  # 启用代理
+    'proxy_pool': [
+        # === 免费代理（稳定性较差）===
+        'http://103.156.17.69:8080',    # 印尼
+        'http://45.182.115.148:999',    # 哥伦比亚
+        'http://177.87.168.6:53281',    # 巴西
+        'http://103.155.54.245:83',     # 印度
+        'http://201.150.100.34:999',    # 秘鲁
+        'http://45.77.56.113:3128',     # 美国
+        'http://103.76.12.42:8181',     # 巴基斯坦
+        'http://103.159.46.14:83',      # 菲律宾
+        'http://45.225.184.177:999',    # 秘鲁
+        'http://103.168.44.153:8080',   # 孟加拉
+    ],
+
+    'proxy_settings': {
+        'rotate_after_failures': 2,  # 失败2次后轮换
+        'test_url': 'http://httpbin.org/ip',  # 代理测试URL
+        'timeout': 10,  # 代理超时
+        'retry_on_proxy_fail': True,  # 代理失败重试
+    },
+
     # 通用页面爬虫配置
     'page_fetch': {
         'max_page_retries': 5,  # 页面获取最大重试次数
@@ -370,6 +412,8 @@ CRAWLER_CONFIG = {
         'wait_css_sec': 8,            # 等 wait_css 的超时
         'stop_loading_on_timeout': True,  # page load timeout 时执行 window.stop()
         'wait_css_required': True,    # wait_css 超时是否视为失败（建议 True）
+        'antibot_consecutive_threshold': 3,
+        'antibot_cooldown_range': (60, 180),
 
     },
 

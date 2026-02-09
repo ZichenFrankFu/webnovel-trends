@@ -15,6 +15,7 @@ Phase 1 目标：
 """
 from __future__ import annotations
 
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -55,10 +56,12 @@ class FanqieSpider(BaseSpider):
         super().__init__(merged_cfg, db_handler=db_handler)
         self.site_key = "fanqie"
         self.platform = "fanqie"
-        self.site_key = "fanqie"
+
         self.default_chapter_count = int(self.site_config.get("chapter_extraction_goal", 5))
         self.rank_type_map: Dict[str, RankIdentity] = self._build_rank_type_map()
         self.char_map = FANQIE_CHAR_MAP
+
+        self._init_proxy_pool()
 
     # ------------------------------------------------------------------
     # Utils: decrypt
@@ -310,6 +313,51 @@ class FanqieSpider(BaseSpider):
                 pass
 
             self._humanlike_sleep(1, 3)
+
+    # ------------------------------------------------------------------
+    # Anti-block
+    # ------------------------------------------------------------------
+    def _apply_stealth_js(self):
+        """应用 stealth JavaScript 隐藏自动化特征"""
+        try:
+            stealth_js = """
+            // 隐藏 webdriver 属性
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+
+            // 覆盖 plugins 属性
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+
+            // 覆盖 languages 属性
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['zh-CN', 'zh', 'en']
+            });
+
+            // 添加 Chrome 特性
+            window.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {},
+                app: {}
+            };
+
+            // 覆盖 permissions 属性
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+            """
+
+            if hasattr(self, 'driver') and self.driver:
+                self.driver.execute_script(stealth_js)
+
+        except Exception as e:
+            self.logger.debug(f"注入 stealth JS 失败: {e}")
 
     # ------------------------------------------------------------------
     # Rank parsing
@@ -906,6 +954,11 @@ class FanqieSpider(BaseSpider):
 
             # 只有需要补全时才访问详情页
             detail = self.fetch_novel_detail(novel_url, novel_id, seed=None)
+            # 如果 detail 页都拿不到有效信息，通常是被风控：直接返回已有章节，不继续打目录/章节
+            if not (detail.get("title") or "").strip() and existing_count == 0:
+                self.logger.error(
+                    f"[章节获取] detail page blocked for novel_id={novel_id}; skip chapter fetch to avoid escalating anti-bot")
+                return []
             display_title = detail.get("title") or f"小说ID:{novel_id}"
             publish_date = detail.get("publish_date", "")
 
@@ -970,7 +1023,7 @@ class FanqieSpider(BaseSpider):
                 })
 
                 if i < len(chapter_infos_to_fetch):
-                    self._humanlike_sleep(1.0, 2.5)
+                    self._humanlike_sleep(1.0, 3)
 
             self.logger.info(f"[章节智能补全] 《{display_title}》 成功抓取 {len(new_chapters)} 章新章节")
             if new_chapters and self.db_handler and hasattr(self.db_handler, "upsert_first_n_chapters"):
@@ -1139,14 +1192,18 @@ class FanqieSpider(BaseSpider):
                         enriched["reading_count"] = int(detail["reading_count"])
 
             if fetch_chapters:
-                _ = self._reconcile_same_book_and_title(enriched)
-                chapters = self.fetch_first_n_chapters(enriched.get("url", ""), target_chapter_count=chapter_count)
-                if chapters:
-                    enriched["first_n_chapters"] = chapters
-                    self.logger.info(f"[数据补完] 《{title}》 获取到 {len(chapters)} 章内容")
+                if not (enriched.get("title") or "").strip() or not enriched.get("main_category"):
+                    self.logger.warning(
+                        f"[章节获取] skip chapters due to missing detail (possible anti-bot). title={enriched.get('title')}")
+                else:
+                    _ = self._reconcile_same_book_and_title(enriched)
+                    chapters = self.fetch_first_n_chapters(enriched.get("url", ""), target_chapter_count=chapter_count)
+                    if chapters:
+                        enriched["first_n_chapters"] = chapters
+                        self.logger.info(f"[数据补完] 《{title}》 获取到 {len(chapters)} 章内容")
 
             out.append(enriched)
-            self._humanlike_sleep(1, 3)
+            self._humanlike_sleep(2, 5)
 
         return out
 
@@ -1296,19 +1353,20 @@ class FanqieSpider(BaseSpider):
             self.logger.warning("site_config.rank_urls is empty; nothing to fetch.")
             return all_books
 
-        crawler_cfg = getattr(self.config, "CRAWLER_CONFIG", {}) or {}
-        global_fetch = (crawler_cfg.get("page_fetch", {}) or {})
-        site_fetch = (self.site_config or {}).get("page_fetch_overrides", {}) or {}
-        cfg = {**global_fetch, **site_fetch}
-
-        between_rank_sleep = cfg.get("between_rank_sleep_range", None)
-        if not isinstance(between_rank_sleep, (list, tuple)) or len(between_rank_sleep) != 2:
-            # 保留你原来的默认值（不强求你改 config）
-            between_rank_sleep = (1, 3)
+        # 添加代理轮换计数器
+        rank_index = 0
 
         for rank_type in rank_urls.keys():
+            rank_index += 1
+
             try:
-                self.logger.info(f"[一键启动] 开始处理榜单: {rank_type}")
+                # 每处理 2-3 个榜单轮换一次代理
+                if self.proxy_pool and rank_index % random.randint(2, 3) == 0:
+                    self._rotate_proxy()
+                    self.restart_driver(f"处理第{rank_index}个榜单后轮换代理")
+                    self._humanlike_sleep(3, 6)  # 代理切换后等待
+
+                self.logger.info(f"[一键启动] 开始处理榜单: {rank_type} (第{rank_index}个榜单)")
 
                 result = self.fetch_and_save_rank(
                     rank_type=rank_type,
@@ -1333,6 +1391,11 @@ class FanqieSpider(BaseSpider):
             except Exception as e:
                 self.logger.error(f"[一键启动] 处理榜单 {rank_type} 失败: {e}")
 
+                # 失败时轮换代理
+                if self.proxy_pool:
+                    self._rotate_proxy()
+                    self.restart_driver(f"处理榜单{rank_type}失败后轮换代理")
+
             finally:
                 # 无论成功/失败，都执行 driver 生命周期策略（由 config 控制是否真的重启）
                 try:
@@ -1343,7 +1406,9 @@ class FanqieSpider(BaseSpider):
 
                 # 榜单间隔（降低风控/降低 driver 压力）
                 try:
-                    self._humanlike_sleep(float(between_rank_sleep[0]), float(between_rank_sleep[1]))
+                    delay = random.uniform(10, 20)  # 增加延迟范围
+                    self.logger.info(f"榜单 {rank_type} 处理完成，等待 {delay:.1f} 秒")
+                    time.sleep(delay)
                 except Exception:
                     pass
 

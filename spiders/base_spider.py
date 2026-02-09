@@ -22,6 +22,9 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import config
 
+class AntiBotDetectedException(Exception):
+    """反爬虫检测异常"""
+    pass
 
 class BaseSpider(ABC):
     """网络小说平台爬虫基类
@@ -55,6 +58,18 @@ class BaseSpider(ABC):
 
         # 日志记录器
         self.logger = self._setup_logger()
+
+        # 代理池相关
+        self.proxy_pool: List[str] = []
+        self.current_proxy_index: int = 0
+        self.current_proxy: Optional[str] = None
+
+        self._init_proxy_pool()
+        if self.proxy_pool:
+            self.current_proxy = self.proxy_pool[0]
+
+        # 反爬检测相关
+        self.antibot_keywords = ['验证码', 'captcha', '访问限制', 'rate limit', '403', '访问异常', '安全验证']
 
         # 缓存
         self.book_cache: Dict[str, Dict[str, Any]] = {}
@@ -105,6 +120,172 @@ class BaseSpider(ABC):
         return logger
 
     # ------------------------------------------------------------------
+    # Anti-Block
+    # ------------------------------------------------------------------
+    def _apply_stealth_js(self):
+        """应用 stealth JavaScript 隐藏自动化特征"""
+        try:
+            stealth_js = """
+            // 隐藏 webdriver 属性
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+
+            // 覆盖 plugins 属性
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+
+            // 覆盖 languages 属性
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['zh-CN', 'zh', 'en']
+            });
+
+            // 添加 Chrome 特性
+            window.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {},
+                app: {}
+            };
+
+            // 覆盖 permissions 属性
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+
+            // 覆盖 navigator 属性
+            Object.defineProperty(navigator, 'hardwareConcurrency', {
+                get: () => 8
+            });
+
+            // 模拟真实的屏幕属性
+            Object.defineProperty(screen, 'orientation', {
+                get: () => ({ type: 'landscape-primary' })
+            });
+            """
+
+            if hasattr(self, 'driver') and self.driver:
+                self.driver.execute_script(stealth_js)
+
+        except Exception as e:
+            self.logger.debug(f"注入 stealth JS 失败: {e}")
+
+    def _init_proxy_pool(self):
+        """从配置加载代理池"""
+        try:
+            proxy_config = (self.site_config or {}).get("proxy_pool", [])
+            if proxy_config:
+                self.proxy_pool = proxy_config
+                self.logger.info(f"初始化代理池，共 {len(self.proxy_pool)} 个代理")
+            else:
+                # 也可以从环境变量或其他配置源加载
+                import os
+                proxy_env = os.environ.get('PROXY_POOL', '')
+                if proxy_env:
+                    self.proxy_pool = [p.strip() for p in proxy_env.split(',') if p.strip()]
+        except Exception as e:
+            self.logger.warning(f"初始化代理池失败: {e}")
+
+    def _rotate_proxy(self) -> bool:
+        if not self.proxy_pool:
+            return False
+        self.current_proxy_index += 1
+        self.current_proxy = self.proxy_pool[self.current_proxy_index % len(self.proxy_pool)]
+        self.logger.info(f"轮换代理: {self.current_proxy}")
+        return True
+
+    def _check_antibot_detected(self, soup: BeautifulSoup, html_length: int = 0) -> bool:
+        """检查是否被反爬虫检测到，包含空白页面检测"""
+        try:
+            # 1. 首先检查页面是否过短（空白页面检测）
+            min_content_length = 200  # 正常页面至少应该有200个字符
+            if html_length < min_content_length:
+                self.logger.warning(f"页面过短 ({html_length} 字符)，疑似反爬空白页面")
+                return True
+
+            # 2. 检查页面文本内容
+            page_text = str(soup).lower()
+
+            # 检查是否包含反爬关键词
+            antibot_patterns = [
+                '验证码', 'captcha', '访问限制', 'rate limit', '403', '访问异常',
+                '安全验证', '请完成验证', 'human verification', 'robot check',
+                'security check', 'access denied', 'denied access',
+                'anti-spam', '反爬虫', '防采集'
+            ]
+
+            for pattern in antibot_patterns:
+                if pattern.lower() in page_text:
+                    self.logger.warning(f"检测到反爬关键词: {pattern}")
+                    return True
+
+            # 3. 检查页面标题
+            title = soup.title.string.lower() if soup.title else ""
+            antibot_titles = [
+                '验证', 'captcha', '安全验证', '访问限制', '403', 'access denied',
+                'robot check', 'human verification', 'verification required'
+            ]
+            for antibot_title in antibot_titles:
+                if antibot_title in title:
+                    self.logger.warning(f"检测到反爬标题: {title}")
+                    return True
+
+            # 4. 检查是否有验证码元素
+            captcha_selectors = [
+                '.captcha', '.verification-code', '.security-check', '#captcha',
+                '.recaptcha', '.h-captcha', '.g-recaptcha', '.verify-code',
+                '.verification', '.verification-modal', '.antibot-modal',
+                '.antispam', '.human-verification', '.robot-check'
+            ]
+            for selector in captcha_selectors:
+                if soup.select_one(selector):
+                    self.logger.warning(f"检测到验证码元素: {selector}")
+                    return True
+
+            # 5. 检查页面是否只包含基础HTML结构（无实际内容）
+            body_content = soup.find('body')
+            if body_content:
+                body_text = body_content.get_text(strip=True)
+                if len(body_text) < 50:  # 页面body内容过少
+                    self.logger.warning(f"页面内容过少 ({len(body_text)} 字符)，疑似反爬")
+                    return True
+
+            # 6. 检查是否有反爬警告信息
+            warning_messages = [
+                '为了保障您的访问安全', '检测到异常访问', '请完成下方验证后继续',
+                '您的请求过于频繁', '请稍后再试', '请输入验证码继续访问'
+            ]
+            for warning in warning_messages:
+                if warning in page_text:
+                    self.logger.warning(f"检测到反爬警告: {warning}")
+                    return True
+
+            # 7. 检查是否有反爬重定向相关的meta标签
+            meta_refresh = soup.find('meta', {'http-equiv': 'refresh'})
+            if meta_refresh and ('url=' in str(meta_refresh.get('content', '')).lower()):
+                self.logger.warning("检测到页面重定向meta标签，疑似反爬")
+                return True
+
+            # 8. 检查是否有iframe指向验证码页面
+            iframes = soup.find_all('iframe')
+            for iframe in iframes:
+                src = iframe.get('src', '')
+                if any(keyword in src.lower() for keyword in ['captcha', 'verify', 'verification', 'challenge']):
+                    self.logger.warning(f"检测到验证码iframe: {src}")
+                    return True
+
+            return False
+
+        except Exception as e:
+            self.logger.debug(f"反爬检测失败: {e}")
+            # 如果反爬检测失败，保守起见认为检测到了反爬
+            return True
+
+    # ------------------------------------------------------------------
     # Selenium and webdriver 初始化
     # ------------------------------------------------------------------
     def _build_selenium_config(self) -> Dict[str, Any]:
@@ -140,7 +321,19 @@ class BaseSpider(ABC):
                 options.add_argument(f"--window-size={opt_cfg['window_size']}")
 
             if opt_cfg.get("user_agent"):
-                options.add_argument(f"user-agent={opt_cfg['user_agent']}")
+                user_agent = opt_cfg['user_agent']
+
+                # 如果是元组或列表，随机选择一个
+                if isinstance(user_agent, (tuple, list)) and len(user_agent) > 0:
+                    import random
+                    selected_ua = random.choice(user_agent)
+                    options.add_argument(f"user-agent={selected_ua}")
+                    self.logger.info(f"随机选择User-Agent: {selected_ua[:50]}...")
+                elif isinstance(user_agent, str):
+                    # 如果是字符串，直接使用
+                    options.add_argument(f"user-agent={user_agent}")
+                else:
+                    self.logger.warning(f"无效的User-Agent配置类型: {type(user_agent)}")
 
             # add all remaining items as flags
             for k, v in opt_cfg.items():
@@ -178,6 +371,12 @@ class BaseSpider(ABC):
                 if "useAutomationExtension" in stealth:
                     options.add_experimental_option("useAutomationExtension", stealth["useAutomationExtension"])
 
+            # ----- anti-antibot -----
+            use_proxy = bool((getattr(self.config, "CRAWLER_CONFIG", {}) or {}).get("use_proxy", False))
+            if use_proxy and self.current_proxy:
+                options.add_argument(f"--proxy-server={self.current_proxy}")
+                self.logger.info(f"[proxy] using proxy-server={self.current_proxy}")
+
             # ----- driver service -----
             driver_path = cfg.get("driver_path")
             auto_install = bool(cfg.get("auto_install_driver", True))
@@ -205,6 +404,7 @@ class BaseSpider(ABC):
             if stealth.get("enabled", True) and script:
                 self.driver.execute_script(script)
 
+            self._apply_stealth_js()
             self.logger.info(f"{self.__class__.__name__} Selenium driver initialized.")
             return True
 
@@ -335,7 +535,8 @@ class BaseSpider(ABC):
 
                 # page load
                 try:
-                    self.driver.set_page_load_timeout(_wait_sec)
+                    page_load_sec = int(cfg.get("page_load_sec", _wait_sec))
+                    self.driver.set_page_load_timeout(page_load_sec)
                 except Exception:
                     pass
 
@@ -370,7 +571,11 @@ class BaseSpider(ABC):
                 html = self._postprocess_html(html)
 
                 if len(html) < min_html_length:
-                    raise ValueError(f"Page source too short: {len(html)}")
+                    # 连续风控计数
+                    self._consecutive_short_pages = int(getattr(self, "_consecutive_short_pages", 0) or 0) + 1
+                    raise AntiBotDetectedException(f"Page source too short: {len(html)}")
+                else:
+                    self._consecutive_short_pages = 0
 
                 soup = BeautifulSoup(html, "html.parser")
 
@@ -410,8 +615,37 @@ class BaseSpider(ABC):
                     pass
                 continue
 
+            except AntiBotDetectedException as e:
+                self.logger.warning(f"[页面获取] 失败 {attempt}/{total_attempts}: {url} ; error={e}")
+
+                # 到阈值就熔断冷却（配置化更好；这里先给默认）
+                n = int(cfg.get("antibot_consecutive_threshold", 3))
+                if int(getattr(self, "_consecutive_short_pages", 0) or 0) >= n:
+                    cooldown = cfg.get("antibot_cooldown_range", (60, 180))
+                    if not isinstance(cooldown, (list, tuple)) or len(cooldown) != 2:
+                        cooldown = (60, 180)
+                    sleep_s = random.uniform(float(cooldown[0]), float(cooldown[1]))
+
+                    self.logger.error(
+                        f"[anti-bot] detected (short html x{self._consecutive_short_pages}). cooldown {sleep_s:.1f}s and rotate proxy.")
+                    if self.proxy_pool:
+                        self._rotate_proxy()
+                    self.restart_driver(reason="anti-bot cooldown")
+                    time.sleep(sleep_s)
+
+                    # 熔断：直接放弃本 URL（不要继续重试撞墙）
+                    return None
+
             except Exception as e:
                 self.logger.warning(f"[页面获取] 失败 {attempt}/{total_attempts}: {url} ; error={e}")
+
+                # 每次失败后增加延迟
+                time.sleep(random.uniform(2, 6))
+
+                # 每两次失败轮换一次代理
+                if attempt % 2 == 0 and self.proxy_pool:
+                    self._rotate_proxy()
+                    self.restart_driver()
 
                 if attempt >= total_attempts:
                     self.logger.error(f"[页面获取] 所有尝试都失败: {url}")
@@ -441,6 +675,37 @@ class BaseSpider(ABC):
     """_get_soup Hook: site-specific html processing (e.g., decrypt)"""
     def _postprocess_html(self, html: str) -> str:
         return html
+
+    def restart_driver(self, reason: str = "") -> bool:
+        """重启driver并应用新配置"""
+        try:
+            if hasattr(self, 'driver') and self.driver:
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+
+            import time
+            import random
+            time.sleep(random.uniform(2, 5))  # 随机延迟
+
+            # 重新初始化driver
+            success = self._init_driver()
+
+            if success:
+                # 应用stealth脚本
+                self._apply_stealth_js()
+
+                if reason:
+                    self.logger.info(f"Driver已重启: {reason}")
+                else:
+                    self.logger.info("Driver已重启")
+
+            return success
+
+        except Exception as e:
+            self.logger.error(f"重启driver失败: {e}")
+            return False
 
     def restart_driver_after_rank(self, rank_type: str = "") -> None:
         """
@@ -662,6 +927,9 @@ class BaseSpider(ABC):
             finally:
                 self.driver = None
 
+        # 清理代理池引用
+        self.proxy_pool = []
+        self.current_proxy_index = 0
     # ------------------------------------------------------------------
     # Common Utils
     # ------------------------------------------------------------------

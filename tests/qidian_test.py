@@ -179,7 +179,6 @@ def _call_fetch_novel_detail(spider, novel: Dict[str, Any], write_db: bool):
         f"Tried (url, pid, seed) variants. Last error: {last_err}"
     )
 
-
 def _call_fetch_first_n_chapters(spider, novel: Dict[str, Any], chapter_n: int, write_db: bool):
     """Adapter for QidianSpider.fetch_first_n_chapters.
 
@@ -212,7 +211,6 @@ def _call_fetch_first_n_chapters(spider, novel: Dict[str, Any], chapter_n: int, 
         "QidianSpider.fetch_first_n_chapters signature mismatch. "
         f"Tried (url, n) variants. Last error: {last_err}"
     )
-
 
 def _close_spider(spider):
     for attr in ("close", "quit", "shutdown"):
@@ -408,7 +406,6 @@ def test_decryption(_: argparse.Namespace):
     """
     print("[SKIP] Qidian does not require font decryption. Test skipped.")
 
-
 def test_quick(args: argparse.Namespace):
     """
     Quick HTML sanity check (NO DB):
@@ -446,7 +443,6 @@ def test_quick(args: argparse.Namespace):
     finally:
         _close_spider(spider)
 
-
 def test_full(args: argparse.Namespace):
     """
     Full pipeline (single rank, write DB):
@@ -482,7 +478,6 @@ def test_full(args: argparse.Namespace):
                 _call_fetch_first_n_chapters(spider, novel, chapter_n=chapter_n, write_db=True)
     finally:
         _close_spider(spider)
-
 
 def test_multi_ranks(args: argparse.Namespace):
     """

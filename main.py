@@ -1,384 +1,269 @@
 # main.py
+"""WebNovel Trends - 小说热点分析系统 CLI
+
+保持 run_once 不改动，同时在 main 里增加“单平台 + 单榜单”抓取入口。
+
+用法示例：
+
+1) 全量抓取（与你之前一致；会跑两个平台的默认榜单集合）
+   python main.py once --qidian_pages 2 --chapter_count 5
+
+2) 单平台 + 单榜单（复用 test 同款接口 fetch_and_save_rank；只跑指定平台/榜单）
+   - 番茄：
+     python main.py once --platform fanqie --rank_key "新书榜科幻末世" --chapter_count 5
+
+   - 起点：
+     python main.py once --platform qidian --rank_key "月票榜" --pages 2 --chapter_count 5
+
+备注：
+- 默认会抓详情页与章节；可以用 --no_detail / --no_chapters 关闭。
+- 番茄 pages 固定为 1（单页滚动），--pages 会被忽略。
+"""
+
 from __future__ import annotations
 
 import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import config
+
+# 现有能力（不修改 run_once）
+from tasks.run_spiders_once import run_once
 from tasks.scheduler import TaskScheduler
 
-# --- Debug prints (keep your current behavior) ---
-print("CONFIG FILE:", config.__file__)
-print("max_page_retries:", config.CRAWLER_CONFIG["page_fetch"].get("max_page_retries"))
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
-def _split_csv(s: str) -> List[str]:
+def _split_csv(s: str) -> list[str]:
     s = (s or "").strip()
     if not s:
         return []
     return [x.strip() for x in s.split(",") if x.strip()]
 
 
-def _today() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+def _resolve_db_path() -> Path:
+    """Resolve novels.db path.
 
-
-def _get_site_cfg(platform: str) -> Dict[str, Any]:
-    # Your tests use: from config import WEBSITES
-    # Main uses config.WEBSITES in your codebase as well.
-    websites = getattr(config, "WEBSITES", {}) or {}
-    return dict(websites.get(platform, {}) or {})
-
-
-def _get_rank_urls(site_cfg: Dict[str, Any]) -> Dict[str, str]:
-    ru = site_cfg.get("rank_urls") or {}
-    return ru if isinstance(ru, dict) else {}
-
-
-def _get_rank_type_map(site_cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    m = site_cfg.get("rank_type_map") or {}
-    return m if isinstance(m, dict) else {}
-
-
-def _resolve_rank_keys(
-    *,
-    platform: str,
-    site_cfg: Dict[str, Any],
-    rank_key: str,
-    rank_csv: str,
-) -> List[str]:
-    rank_key = (rank_key or "").strip()
-    if rank_key:
-        return [rank_key]
-
-    keys = _split_csv(rank_csv)
-    if keys:
-        return keys
-
-    # default = all configured ranks
-    return list(_get_rank_urls(site_cfg).keys())
-
-
-def _validate_rank_keys(*, platform: str, site_cfg: Dict[str, Any], keys: List[str]) -> None:
-    valid = set(_get_rank_urls(site_cfg).keys())
-    bad = [k for k in keys if k not in valid]
-    if bad:
-        raise ValueError(
-            f"[{platform}] invalid rank key(s): {bad}. "
-            f"Valid keys are: {sorted(valid)}"
-        )
-
-
-def _init_db(db_path: Optional[str] = None):
+    兼容不同 config 写法：
+    - config.DB_PATH / config.DB_FILE / config.SQLITE_PATH
+    - config.OUTPUT_PATHS['data']
+    - 默认 outputs/data/novels.db
     """
-    Initialize DatabaseHandler with signature compatibility.
-    If db_path is None, default to <project_root>/outputs/data/novels.db
-    """
+    # 1) explicit path
+    for attr in ("DB_PATH", "DB_FILE", "SQLITE_PATH"):
+        p = getattr(config, attr, None)
+        if isinstance(p, str) and p.strip():
+            pp = Path(p)
+            return pp if pp.is_absolute() else (PROJECT_ROOT / pp)
+
+    # 2) OUTPUT_PATHS
+    out = getattr(config, "OUTPUT_PATHS", {}) or {}
+    data_dir = out.get("data") or out.get("db") or "outputs/data"
+    return (PROJECT_ROOT / data_dir / "novels.db")
+
+
+def _init_db(db_path: Path):
+    """Init DatabaseHandler (compatible with both old/new signatures)."""
     from database.db_handler import DatabaseHandler
 
-    if not db_path:
-        default_path = PROJECT_ROOT / "outputs" / "data" / "novels.db"
-        default_path.parent.mkdir(parents=True, exist_ok=True)
-        db_path = str(default_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Try new signature first
     try:
-        return DatabaseHandler(db_path, is_test=False)
+        return DatabaseHandler(str(db_path), is_test=False)
     except TypeError:
-        # Older signature
-        return DatabaseHandler(db_path=db_path)
+        return DatabaseHandler(db_path=str(db_path))
 
 
-def _close_spider(spider: Any) -> None:
-    for attr in ("close", "quit", "shutdown"):
-        fn = getattr(spider, attr, None)
-        if callable(fn):
-            try:
-                fn()
-            except Exception:
-                pass
-            return
+def _print_rank_keys(platform: str) -> str:
+    websites = getattr(config, "WEBSITES", {}) or {}
+    cfg = (websites.get(platform) or {})
+    rank_urls = (cfg.get("rank_urls") or {})
+    if not rank_urls:
+        return "(none)"
+    keys = list(rank_urls.keys())
+    return ", ".join(keys)
 
 
-# ------------------------------------------------------------------
-# Spider init adapters (signature drift safe)
-# ------------------------------------------------------------------
-def _init_qidian_spider(site_cfg: Dict[str, Any], db: Any):
-    from spiders.qidian_spider import QidianSpider
-
-    # pattern A: QidianSpider(site_cfg, db_handler=db)
-    try:
-        return QidianSpider(site_cfg, db_handler=db)
-    except TypeError:
-        pass
-
-    # pattern B: QidianSpider(site_cfg, db)
-    try:
-        return QidianSpider(site_cfg, db)
-    except TypeError:
-        pass
-
-    # pattern C: QidianSpider(site_cfg) then attach
-    spider = QidianSpider(site_cfg)
-    if hasattr(spider, "db_handler"):
-        setattr(spider, "db_handler", db)
-    elif hasattr(spider, "db"):
-        setattr(spider, "db", db)
-    return spider
-
-
-def _init_fanqie_spider(site_cfg: Dict[str, Any], db: Any):
-    from spiders.fanqie_spider import FanqieSpider
-
-    # pattern A: FanqieSpider(site_cfg, db_handler=db)
-    try:
-        return FanqieSpider(site_cfg, db_handler=db)
-    except TypeError:
-        pass
-
-    # pattern B: FanqieSpider(site_cfg, db)
-    try:
-        return FanqieSpider(site_cfg, db)
-    except TypeError:
-        pass
-
-    # pattern C: FanqieSpider(site_cfg) then attach
-    spider = FanqieSpider(site_cfg)
-    if hasattr(spider, "db_handler"):
-        setattr(spider, "db_handler", db)
-    elif hasattr(spider, "db"):
-        setattr(spider, "db", db)
-    return spider
-
-
-# ------------------------------------------------------------------
-# Core runners (test-like interface)
-# ------------------------------------------------------------------
-def _run_one_platform(
+def _run_single_rank(
     *,
     platform: str,
-    rank_keys: List[str],
-    qidian_pages: int,
-    fanqie_pages: int,
+    rank_key: str,
+    pages: Optional[int],
     chapter_count: int,
     enrich_detail: bool,
     enrich_chapters: bool,
-    snapshot_date: str,
-    db: Any,
 ) -> None:
-    site_cfg = _get_site_cfg(platform)
-    rank_urls = _get_rank_urls(site_cfg)
-    rank_type_map = _get_rank_type_map(site_cfg)
+    """Single platform + single rank pipeline.
 
-    _validate_rank_keys(platform=platform, site_cfg=site_cfg, keys=rank_keys)
+    关键：调用 spider.fetch_and_save_rank()，让 spider 自己负责：
+    - rank 抓取
+    - detail 补全
+    - 章节抓取
+    - rank snapshot / chapters 写库
+    """
 
-    # init spider
-    spider = None
-    try:
-        if platform == "qidian":
-            spider = _init_qidian_spider(site_cfg, db=db)
-        else:
-            spider = _init_fanqie_spider(site_cfg, db=db)
+    db_path = _resolve_db_path()
+    db = _init_db(db_path)
+    print(f"[db] initialized: {db_path}")
 
-        print("\n" + "=" * 70)
-        print(f"[{platform}] ranks={len(rank_keys)} pages={(qidian_pages if platform=='qidian' else fanqie_pages)} chapters={chapter_count}")
-        print("=" * 70)
+    platform = (platform or "").strip().lower()
 
-        # qidian pages are read from site_config["pages_per_rank"] in your test adapter
-        if platform == "qidian":
-            try:
-                if hasattr(spider, "site_config") and isinstance(spider.site_config, dict):
-                    spider.site_config["pages_per_rank"] = int(qidian_pages)
-            except Exception:
-                pass
+    if platform == "qidian":
+        from spiders.qidian_spider import QidianSpider
 
-        for rk in rank_keys:
-            ident = rank_type_map.get(rk, {}) or {}
-            rank_family = ident.get("rank_family") or rk
-            rank_sub_cat = ident.get("rank_sub_cat") or ""
+        site_cfg: Dict[str, Any] = {}  # 让 spider 自己 merge config.WEBSITES['qidian']
+        spider = QidianSpider(site_cfg, db)
 
-            print(f"\n[{platform}] rank={rk} | rank_family={rank_family} | rank_sub_cat={rank_sub_cat or '-'} | chapters={chapter_count}")
+        rank_urls = (spider.site_config.get("rank_urls") or {})
+        if rank_key not in rank_urls:
+            raise SystemExit(
+                f"[qidian] unknown rank_key: {rank_key}.\n"
+                f"Available: {_print_rank_keys('qidian')}"
+            )
 
-            # 1) fetch rank list
-            if platform == "qidian":
-                # qidian spider signature might be fetch_rank_list(rank_type=...)
-                try:
-                    items = spider.fetch_rank_list(rank_type=rk)
-                except TypeError:
-                    items = spider.fetch_rank_list(rk)
-            else:
-                # fanqie test uses fetch_rank_list(rank_key, pages=pages)
-                try:
-                    items = spider.fetch_rank_list(rk, pages=int(fanqie_pages))
-                except TypeError:
-                    # fallback if pages not supported
-                    items = spider.fetch_rank_list(rk)
+        result = spider.fetch_and_save_rank(
+            rank_type=rank_key,
+            pages=pages,
+            enrich_detail=enrich_detail,
+            enrich_chapters=enrich_chapters,
+            chapter_count=chapter_count,
+        )
+        ident = f"{result.get('rank_family','')}|{result.get('rank_sub_cat','')}".strip("|")
+        print(
+            f"\n[qidian] done: rank={rank_key} ({ident}) "
+            f"items={len(result.get('items') or [])} snapshot_id={result.get('snapshot_id')}"
+        )
 
-            items = items or []
-            if not items:
-                print(f"[{platform}] rank={rk} empty; skip.")
-                continue
+        spider.close()
+        return
 
-            # 2) enrich metadata (details only; do NOT auto-fetch chapters here)
-            enriched = items
-            if enrich_detail:
-                try:
-                    enriched = spider.enrich_rank_items(
-                        items,
-                        max_books=len(items),
-                        fetch_detail=True,
-                        fetch_chapters=False,
-                        chapter_count=0,
-                    ) or []
-                except TypeError:
-                    # older signature fallback
-                    enriched = spider.enrich_rank_items(items) or []
+    if platform == "fanqie":
+        from spiders.fanqie_spider import FanqieSpider
 
-            # 3) save rank snapshot to DB (same idea as fanqie_test)
-            if hasattr(db, "save_rank_snapshot"):
-                try:
-                    db.save_rank_snapshot(
-                        platform=platform,
-                        rank_family=rank_family,
-                        rank_sub_cat=(rank_sub_cat or rk),
-                        snapshot_date=snapshot_date,
-                        items=enriched,
-                        source_url=rank_urls.get(rk, ""),
-                        make_title_primary=True,
-                    )
-                except TypeError:
-                    # older db signature fallback (ignore extras)
-                    db.save_rank_snapshot(
-                        platform=platform,
-                        rank_family=rank_family,
-                        rank_sub_cat=(rank_sub_cat or rk),
-                        snapshot_date=snapshot_date,
-                        items=enriched,
-                    )
+        site_cfg: Dict[str, Any] = {}
+        spider = FanqieSpider(site_cfg, db)
 
-            # 4) chapters
-            if enrich_chapters and chapter_count > 0:
-                # For qidian: spider likely writes chapters to db internally if db_handler present.
-                # For fanqie: to be safe, we also upsert via db if method exists.
-                for i, book in enumerate(enriched, 1):
-                    url = (book.get("url") or "").strip()
-                    pid = (book.get("platform_novel_id") or book.get("novel_id") or "").strip()
-                    if not url or not pid:
-                        continue
+        rank_urls = (spider.site_config.get("rank_urls") or {})
+        if rank_key not in rank_urls:
+            raise SystemExit(
+                f"[fanqie] unknown rank_key: {rank_key}.\n"
+                f"Available: {_print_rank_keys('fanqie')}"
+            )
 
-                    # fetch chapters
-                    chapters = None
-                    if platform == "qidian":
-                        title = book.get("title") or ""
-                        try:
-                            chapters = spider.fetch_first_n_chapters(url, int(chapter_count), fallback_title=title)
-                        except TypeError:
-                            chapters = spider.fetch_first_n_chapters(url, int(chapter_count))
-                    else:
-                        try:
-                            chapters = spider.fetch_first_n_chapters(url, target_chapter_count=int(chapter_count))
-                        except TypeError:
-                            chapters = spider.fetch_first_n_chapters(url, int(chapter_count))
+        # 番茄榜单只有 1 页（滚动加载），pages 参数无意义
+        result = spider.fetch_and_save_rank(
+            rank_type=rank_key,
+            pages=None,
+            enrich_detail=enrich_detail,
+            enrich_chapters=enrich_chapters,
+            chapter_count=chapter_count,
+        )
+        ident = f"{result.get('rank_family','')}|{result.get('rank_sub_cat','')}".strip("|")
+        print(
+            f"\n[fanqie] done: rank={rank_key} ({ident}) "
+            f"items={len(result.get('items') or [])} snapshot_id={result.get('snapshot_id')}"
+        )
 
-                    chapters = chapters or []
+        spider.close()
+        return
 
-                    # fanqie: ensure DB write even if spider doesn't auto-upsert
-                    if platform == "fanqie" and chapters and hasattr(db, "upsert_first_n_chapters"):
-                        publish_date = chapters[0].get("publish_date") or snapshot_date
-                        db.upsert_first_n_chapters(
-                            platform="fanqie",
-                            platform_novel_id=pid,
-                            publish_date=publish_date,
-                            chapters=chapters,
-                            novel_fallback_fields={
-                                "title": book.get("title", ""),
-                                "author": book.get("author", ""),
-                                "intro": book.get("intro", ""),
-                                "main_category": book.get("main_category", ""),
-                                "status": book.get("status", ""),
-                                "total_words": book.get("total_words", 0),
-                                "url": book.get("url", ""),
-                                "tags": book.get("tags", []),
-                            },
-                        )
-
-    finally:
-        if spider:
-            _close_spider(spider)
+    raise SystemExit("--platform must be one of: qidian, fanqie")
 
 
-def run_scheduler():
+def run_scheduler() -> None:
     print("[scheduler] starting TaskScheduler...")
     scheduler = TaskScheduler()
     scheduler.run_forever(interval_minutes=60)
 
 
-# ------------------------------------------------------------------
-# CLI
-# ------------------------------------------------------------------
-def main():
-    epilog = r"""
-Examples:
+def build_parser() -> argparse.ArgumentParser:
+    websites = getattr(config, "WEBSITES", {}) or {}
+    fanqie_keys = ", ".join((websites.get("fanqie", {}) or {}).get("rank_urls", {}).keys())
+    qidian_keys = ", ".join((websites.get("qidian", {}) or {}).get("rank_urls", {}).keys())
 
-1) 默认全量（起点+番茄，全部 config 榜单）
-   python main.py once
-
-2) 单平台：只跑番茄全部榜单
-   python main.py once --platform fanqie --chapter_count 5
-
-3) 单平台单榜单：番茄（rank_key 必须是 config.WEBSITES['fanqie']['rank_urls'] 的完整键名）
-   python main.py once --platform fanqie --rank_key 阅读榜西方奇幻 --chapter_count 5
-   python main.py once --platform fanqie --rank_key 新书榜科幻末世 --chapter_count 5
-
-4) 单平台单榜单：起点
-   python main.py once --platform qidian --rank_key 月票榜 --qidian_pages 5 --chapter_count 5
-
-5) 多榜单 CSV（仍支持）
-   python main.py once --platform fanqie --fanqie_ranks 阅读榜科幻末世,新书榜科幻末世 --chapter_count 5
-   python main.py once --platform qidian --qidian_ranks 月票榜,畅销榜 --qidian_pages 3 --chapter_count 5
-"""
+    epilog_lines = [
+        "Examples:",
+        "  # 全量抓取（run_once，不变）",
+        "  python main.py once --qidian_pages 2 --chapter_count 5",
+        "",
+        "  # 单平台单榜（推荐；和 tests 同款接口）",
+        "  python main.py once --platform fanqie --rank_key \"新书榜科幻末世\" --chapter_count 5",
+        "  python main.py once --platform qidian --rank_key \"月票榜\" --pages 2 --chapter_count 5",
+        "",
+        "Available rank keys (from config.py):",
+        f"  qidian: {qidian_keys or '(none)'}",
+        f"  fanqie: {fanqie_keys or '(none)'}",
+    ]
 
     parser = argparse.ArgumentParser(
-        description="WebNovel Trends - 小说热点分析系统（绕开 run_once，直接用 spider 接口跑单平台/单榜单）",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=epilog,
+        description="WebNovel Trends - 小说热点分析系统",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="\n".join(epilog_lines),
     )
 
-    parser.add_argument("mode", choices=["once", "scheduler"], help="运行模式: once | scheduler")
+    parser.add_argument(
+        "mode",
+        choices=["once", "scheduler"],
+        help="运行模式: once(单次运行), scheduler(定时任务)",
+    )
 
+    # --- Single platform / single rank ---
     parser.add_argument(
         "--platform",
-        choices=["all", "qidian", "fanqie"],
-        default="all",
-        help="选择运行平台：all(默认), qidian, fanqie",
+        choices=["qidian", "fanqie"],
+        default=None,
+        help="只运行指定平台（与 --rank_key 配合使用）。不提供则走 run_once（全量）。",
     )
-
     parser.add_argument(
         "--rank_key",
-        default="",
-        help="只跑一个榜单（需配合 --platform qidian/fanqie；platform=all 时不允许）",
+        default=None,
+        help="指定平台的榜单 key（必须与 config.py 中的 rank_urls key 完全一致）。",
+    )
+    parser.add_argument(
+        "--pages",
+        type=int,
+        default=None,
+        help="仅起点有效：每个榜单抓取页数。番茄忽略（固定 1 页滚动加载）。",
     )
 
-    parser.add_argument("--qidian_ranks", default="", help="起点榜单 key（逗号分隔）。默认=全部")
-    parser.add_argument("--fanqie_ranks", default="", help="番茄榜单 key（逗号分隔，必须为完整键名如：阅读榜科幻末世）。默认=全部")
+    # --- run_once controls (keep) ---
+    parser.add_argument(
+        "--qidian_ranks",
+        default="",
+        help="起点榜单类型（逗号分隔）。默认=运行 config 里 rank_type_map 的所有榜单",
+    )
+    parser.add_argument(
+        "--qidian_pages",
+        type=int,
+        default=2,
+        help="起点每个榜单抓取页数，默认=2（约40本书）",
+    )
+    parser.add_argument(
+        "--fanqie_ranks",
+        default="",
+        help="番茄榜单类型（逗号分隔）。默认=运行 config 里 rank_type_map 的所有榜单",
+    )
 
-    parser.add_argument("--qidian_pages", type=int, default=2, help="起点每榜抓取页数（默认2）")
-    parser.add_argument("--fanqie_pages", type=int, default=1, help="番茄榜单页数（默认1；多数榜单无分页或固定30本）")
+    # Chapters
+    parser.add_argument(
+        "--chapter_count",
+        type=int,
+        default=5,
+        help="起点/番茄：每本书抓取并存储的前N章，默认=5",
+    )
 
-    parser.add_argument("--chapter_count", type=int, default=5, help="每本书抓取前 N 章（默认5）")
-    parser.add_argument("--no_detail", action="store_true", help="禁用详情补全")
+    # Optional switches
+    parser.add_argument("--no_detail", action="store_true", help="禁用详情页补全")
     parser.add_argument("--no_chapters", action="store_true", help="禁用章节抓取")
 
-    parser.add_argument("--snapshot_date", type=str, default="", help="快照日期 YYYY-MM-DD（默认今天）")
-    parser.add_argument("--db_path", type=str, default="", help="数据库路径（默认 outputs/data/novels.db）")
+    return parser
 
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
     print("WebNovel Trends 小说热点分析系统")
@@ -389,66 +274,34 @@ Examples:
         run_scheduler()
         return
 
-    # once mode
-    if args.platform == "all" and (args.rank_key or "").strip():
-        parser.error("--platform all 时不允许使用 --rank_key（请指定 qidian 或 fanqie）")
-
-    snapshot_date = (args.snapshot_date or "").strip() or _today()
-
-    db = _init_db(args.db_path)
-
-    # Resolve ranks per platform
-    if args.platform in ("all", "qidian"):
-        q_cfg = _get_site_cfg("qidian")
-        q_rank_keys = _resolve_rank_keys(
-            platform="qidian",
-            site_cfg=q_cfg,
-            rank_key=(args.rank_key if args.platform == "qidian" else ""),
-            rank_csv=args.qidian_ranks,
-        )
-    else:
-        q_rank_keys = []
-
-    if args.platform in ("all", "fanqie"):
-        f_cfg = _get_site_cfg("fanqie")
-        f_rank_keys = _resolve_rank_keys(
-            platform="fanqie",
-            site_cfg=f_cfg,
-            rank_key=(args.rank_key if args.platform == "fanqie" else ""),
-            rank_csv=args.fanqie_ranks,
-        )
-    else:
-        f_rank_keys = []
-
+    # mode == once
     enrich_detail = (not args.no_detail)
     enrich_chapters = (not args.no_chapters)
 
-    # Run requested platforms
-    if args.platform in ("all", "qidian") and q_rank_keys:
-        _run_one_platform(
-            platform="qidian",
-            rank_keys=q_rank_keys,
-            qidian_pages=int(args.qidian_pages),
-            fanqie_pages=int(args.fanqie_pages),
-            chapter_count=int(args.chapter_count),
-            enrich_detail=enrich_detail,
-            enrich_chapters=enrich_chapters,
-            snapshot_date=snapshot_date,
-            db=db,
-        )
+    # 单平台单榜：优先
+    if args.platform or args.rank_key:
+        if not args.platform or not args.rank_key:
+            raise SystemExit("单平台单榜模式必须同时提供 --platform 和 --rank_key")
 
-    if args.platform in ("all", "fanqie") and f_rank_keys:
-        _run_one_platform(
-            platform="fanqie",
-            rank_keys=f_rank_keys,
-            qidian_pages=int(args.qidian_pages),
-            fanqie_pages=int(args.fanqie_pages),
+        _run_single_rank(
+            platform=args.platform,
+            rank_key=args.rank_key,
+            pages=args.pages,
             chapter_count=int(args.chapter_count),
             enrich_detail=enrich_detail,
             enrich_chapters=enrich_chapters,
-            snapshot_date=snapshot_date,
-            db=db,
         )
+        return
+
+    # 否则：走原 run_once（不改动）
+    run_once(
+        qidian_rank_types=_split_csv(args.qidian_ranks) or None,
+        qidian_pages=int(args.qidian_pages),
+        fanqie_rank_types=_split_csv(args.fanqie_ranks) or None,
+        chapter_count=int(args.chapter_count),
+        enrich_detail=enrich_detail,
+        enrich_chapters=enrich_chapters,
+    )
 
 
 if __name__ == "__main__":
