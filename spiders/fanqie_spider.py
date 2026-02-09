@@ -280,7 +280,6 @@ class FanqieSpider(BaseSpider):
         if item_css is None:
             item_css = sel_cfg.get("item_css", ".rank-book-item, .book-item, .book-list-item, .rank-item")
 
-        # 兼容 config 里叫 scroll_delay（你现在 config.py 就是这个字段名）
         if scroll_pause_sec is None:
             scroll_pause_sec = float(sel_cfg.get("scroll_pause_sec", sel_cfg.get("scroll_delay", 2.5)))
 
@@ -530,7 +529,7 @@ class FanqieSpider(BaseSpider):
             self.logger.info(f"Page {page}: found {len(page_items)} items, {len(unique_items)} unique (global)")
 
             if page < pages:
-                self._humanlike_sleep(1, 3)
+                self._humanlike_sleep(3, 5)
 
         return all_items
 
@@ -948,8 +947,19 @@ class FanqieSpider(BaseSpider):
         try:
             existing_count = self._get_existing_chapter_count(novel_id)
 
+            self.logger.info(
+                f"[章节智能补全] 开始智能获取数据库中缺少的章节: (ID: {novel_id}), 目标{target_chapter_count}章"
+            )
+            self.logger.info(f"[章节智能补全] 数据库查询到已有章节数: {existing_count}")
+
             if existing_count >= target_chapter_count:
+                self.logger.info(f"[章节智能补全] 已有{existing_count}章 ≥ 目标{target_chapter_count}章，直接从数据库获取")
                 existing = self._get_existing_chapters(novel_id, target_chapter_count)
+                if not existing:
+                    self.logger.warning(
+                        f"[章节智能补全] DB显示已有{existing_count}章，但实际读取为空 (novel_id={novel_id})"
+                    )
+                    return []
                 return self._format_existing_chapters(existing, target_chapter_count, publish_date="")
 
             # 只有需要补全时才访问详情页
@@ -965,6 +975,11 @@ class FanqieSpider(BaseSpider):
             if existing_count >= target_chapter_count:
                 self.logger.info(f"[章节智能补全] 《{display_title}》 DB已有{existing_count}章 ≥ 目标{target_chapter_count}章，直接从数据库加载")
                 existing = self._get_existing_chapters(novel_id, target_chapter_count)
+                if not existing:
+                    self.logger.warning(
+                        f"[章节智能补全] 《{display_title}》 DB显示已有{existing_count}章，但实际读取为空 (novel_id={novel_id})"
+                    )
+                    return []
                 return self._format_existing_chapters(existing, target_chapter_count, publish_date=publish_date)
 
             existing_chapters: List[Dict[str, Any]] = []
@@ -974,7 +989,6 @@ class FanqieSpider(BaseSpider):
             need_count = target_chapter_count - existing_count
             self.logger.info(f"[章节智能补全] 《{display_title}》 需要抓取{need_count}章（已有{existing_count}章，目标{target_chapter_count}章）")
 
-            # 目录页：你原来写的 wait_css="..." 会导致等待逻辑无意义甚至超时，这里改成可用 selector
             catalog_url = f"{novel_url}#Catalog" if "#" not in novel_url else novel_url
             self.logger.info(f"[章节智能补全] 《{display_title}》 访问目录页: {catalog_url}")
 
@@ -1023,7 +1037,7 @@ class FanqieSpider(BaseSpider):
                 })
 
                 if i < len(chapter_infos_to_fetch):
-                    self._humanlike_sleep(1.0, 3)
+                    self._humanlike_sleep(2, 5)
 
             self.logger.info(f"[章节智能补全] 《{display_title}》 成功抓取 {len(new_chapters)} 章新章节")
             if new_chapters and self.db_handler and hasattr(self.db_handler, "upsert_first_n_chapters"):
