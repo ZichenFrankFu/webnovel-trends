@@ -42,8 +42,12 @@ python main.py once --platform fanqie --chapter_count 5 --newbook_chapter_count 
 ```text
 webnovel_trends/
 ├── analysis/
-│   ├── trend_analyzer.py    # 趋势分析器
-│   └── visualizer.py        # 可视化模块
+├── run_analysis.py             # CLI 入口
+    ├── trend_analyzer.py       # 主要 orchestrator
+    ├── data_access.py          # SQL / df 读取
+    ├── heat.py                 # heat_raw/pct/robust_z/mix
+    ├── metrics.py              # 计算所有指标
+    └── report.py               # 生成最终 Markdown report
 ├── database/
 │   └── db_schema.py         # 数据库schema设置
 │   └── db_handler.py        # 数据库交互操作

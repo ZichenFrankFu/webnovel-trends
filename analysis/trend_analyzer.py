@@ -1,300 +1,216 @@
 # analysis/trend_analyzer.py
+from __future__ import annotations
 
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-import json
-import logging
-from collections import Counter
-import jieba
-import jieba.analyse
+import os
+from dataclasses import dataclass
+
+from analysis.data_access import connect_sqlite, load_rank_long_df
+from analysis.heat import HeatConfig, add_heat
+from analysis.metrics import (
+    MetricConfig,
+    add_unified_columns,
+    compute_weekly_tag_panel,
+    compute_timewindow_rollup,
+    compute_new_entry_ratio_compact,
+    compute_cooccurrence_pairs,
+    compute_cooccurrence_triples,
+)
+from analysis.report import ReportConfig, build_final_report
+from analysis.visualization import save_bar_topk, save_line_top_tags
+
+
+@dataclass(frozen=True)
+class AnalyzerArgs:
+    db_path: str
+    start_date: str
+    end_date: str
+    platform: str = "both"
+    rank_family: str | None = None
+    rank_sub_cat: str | None = None
+    top_k: int = 20
+    report_dir: str = "outputs/reports"
+    report_id: str | None = None
 
 
 class TrendAnalyzer:
-    def __init__(self, db_handler):
-        self.db_handler = db_handler
-        self.logger = logging.getLogger('TrendAnalyzer')
+    def __init__(self, heat_cfg: HeatConfig | None = None, metric_cfg: MetricConfig | None = None):
+        self.heat_cfg = heat_cfg or HeatConfig(alpha=0.7, tanh_c=3.0)
+        self.metric_cfg = metric_cfg or MetricConfig(
+            top_n_for_top_appearance=10,
+            entry_top_n=30,
+            top_k_tags=20,
+            top_k_pairs=30,
+            top_k_triples=30,
+        )
 
-        # 初始化jieba
-        jieba.initialize()
+    def _make_assets(self, *, weekly, roll, report_assets_dir: str, topk: int) -> dict[str, dict[str, str]]:
+        """
+        生成可视化图片，返回相对路径（相对于 report md 的目录）
+        images[platform][key] = relative_path
+        """
+        images: dict[str, dict[str, str]] = {"fanqie": {}, "qidian": {}}
 
-    def analyze_daily_trends(self, date_str=None):
-        """分析每日趋势"""
-        if not date_str:
-            date_str = datetime.now().strftime('%Y-%m-%d')
+        # 平台拆开画图
+        for p in ["fanqie", "qidian"]:
+            r = roll[roll["platform"] == p].copy()
+            w = weekly[weekly["platform"] == p].copy()
 
-        yesterday = (datetime.strptime(date_str, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
-
-        trends_report = {
-            'analysis_date': date_str,
-            'platforms': {},
-            'summary': {}
-        }
-
-        # 分析各平台
-        for platform in ['qidian', 'fanqie']:
-            platform_trends = self._analyze_platform_trends(date_str, yesterday, platform)
-            trends_report['platforms'][platform] = platform_trends
-
-        # 生成总结
-        trends_report['summary'] = self._generate_summary(trends_report['platforms'])
-
-        return trends_report
-
-    def _analyze_platform_trends(self, today, yesterday, platform):
-        """分析单个平台的趋势"""
-        platform_data = {
-            'platform': platform,
-            'date': today,
-            'rank_types': {},
-            'top_tags': [],
-            'rising_stars': [],
-            'falling_stars': []
-        }
-
-        # 获取今日榜单
-        today_df = self.db_handler.get_daily_ranking(today, platform=platform)
-
-        if today_df.empty:
-            self.logger.warning(f"没有找到{platform}在{today}的数据")
-            return platform_data
-
-        # 分析各榜单类型
-        for rank_type in today_df['rank_type'].unique():
-            rank_data = self._analyze_rank_type(today, yesterday, platform, rank_type)
-            platform_data['rank_types'][rank_type] = rank_data
-
-        # 提取热门标签
-        all_tags = self._extract_tags_from_dataframe(today_df)
-        top_tags = Counter(all_tags).most_common(10)
-        platform_data['top_tags'] = [{'tag': tag, 'count': count} for tag, count in top_tags]
-
-        # 计算排名变动
-        if yesterday:
-            rank_changes = self.db_handler.calculate_rank_change(today, yesterday, platform, 'hot', 100)
-            if not rank_changes.empty:
-                # 上升最快
-                rising = rank_changes[rank_changes['rank_change'] > 0].nlargest(5, 'rank_change')
-                platform_data['rising_stars'] = rising.to_dict('records')
-
-                # 下降最快
-                falling = rank_changes[rank_changes['rank_change'] < 0].nsmallest(5, 'rank_change')
-                platform_data['falling_stars'] = falling.to_dict('records')
-
-        return platform_data
-
-    def _analyze_rank_type(self, today, yesterday, platform, rank_type):
-        """分析特定榜单类型"""
-        today_df = self.db_handler.get_daily_ranking(today, platform, rank_type)
-
-        if today_df.empty:
-            return {}
-
-        # 标签分析
-        tag_stats = self._analyze_tags(today_df)
-
-        # 保存到数据库
-        self.db_handler.save_trend_statistics(today, platform, rank_type, tag_stats)
-
-        # 统计信息
-        stats = {
-            'total_books': len(today_df),
-            'top_tags': [],
-            'tag_diversity': len(tag_stats),
-            'avg_rank_change': 0
-        }
-
-        # 热门标签
-        sorted_tags = sorted(tag_stats.items(), key=lambda x: x[1][0], reverse=True)[:5]
-        stats['top_tags'] = [{'tag': tag, 'count': count, 'percentage': count / total * 100}
-                             for tag, (count, total) in sorted_tags]
-
-        return stats
-
-    def _analyze_tags(self, df):
-        """分析标签统计"""
-        all_tags = []
-
-        for tags_json in df['tags'].dropna():
-            try:
-                tags = json.loads(tags_json)
-                all_tags.extend(tags)
-            except:
+            if r.empty:
                 continue
 
-        tag_counter = Counter(all_tags)
-        total_books = len(df)
+            # 1) Market share Top10 bar
+            path_share = os.path.join(report_assets_dir, f"{p}_share_top10.png")
+            save_bar_topk(
+                r,
+                label_col="tag_u",
+                value_col="mean_share",
+                title=f"{p} - Top10 tags by mean_share",
+                out_path=path_share,
+                topk=min(10, topk),
+            )
+            images[p]["share_top10"] = os.path.relpath(path_share, start=os.path.dirname(report_assets_dir))
 
-        # 计算每个标签的统计
-        tag_stats = {}
-        for tag, count in tag_counter.items():
-            tag_stats[tag] = (count, total_books)
+            # 2) Heat Top10 bar
+            path_heat = os.path.join(report_assets_dir, f"{p}_heat_top10.png")
+            save_bar_topk(
+                r,
+                label_col="tag_u",
+                value_col="avg_heat",
+                title=f"{p} - Top10 tags by avg_heat",
+                out_path=path_heat,
+                topk=min(10, topk),
+            )
+            images[p]["heat_top10"] = os.path.relpath(path_heat, start=os.path.dirname(report_assets_dir))
 
-        return tag_stats
+            # 3) concentration_index line (按周)
+            if not w.empty and "concentration_index" in w.columns:
+                # 先在榜单层聚合到周
+                ww = w.groupby(["week"])["concentration_index"].mean().reset_index()
+                path_conc = os.path.join(report_assets_dir, f"{p}_concentration_weekly.png")
+                save_line_top_tags(
+                    ww.assign(dummy="concentration"),
+                    x_col="week",
+                    y_col="concentration_index",
+                    tag_col="dummy",
+                    title=f"{p} - concentration_index over weeks",
+                    out_path=path_conc,
+                    topk=1,
+                )
+                images[p]["concentration_weekly"] = os.path.relpath(path_conc, start=os.path.dirname(report_assets_dir))
 
-    def _extract_tags_from_dataframe(self, df):
-        """从DataFrame中提取所有标签"""
-        all_tags = []
+            # 4) Chance tags heat/share trend（取 roll 里 chance_score 前5的 tag）
+            if not w.empty:
+                r2 = r.copy()
+                r2["chance_score"] = (-r2["rank_slope"].fillna(0)) + r2["heat_slope"].fillna(0) + r2["share_slope"].fillna(0)
+                top_tags = r2.sort_values("chance_score", ascending=False)["tag_u"].head(5).tolist()
+                wt = w[w["tag_u"].isin(top_tags)].copy()
+                if not wt.empty:
+                    path_heat_tr = os.path.join(report_assets_dir, f"{p}_chance_heat_trend.png")
+                    save_line_top_tags(
+                        wt,
+                        x_col="week",
+                        y_col="avg_heat_raw",
+                        tag_col="tag_u",
+                        title=f"{p} - chance tags avg_heat trend",
+                        out_path=path_heat_tr,
+                        topk=min(5, len(top_tags)),
+                    )
+                    images[p]["chance_heat_trend"] = os.path.relpath(path_heat_tr, start=os.path.dirname(report_assets_dir))
 
-        for tags_json in df['tags'].dropna():
-            try:
-                tags = json.loads(tags_json)
-                all_tags.extend(tags)
-            except:
-                continue
+                    path_share_tr = os.path.join(report_assets_dir, f"{p}_chance_share_trend.png")
+                    save_line_top_tags(
+                        wt,
+                        x_col="week",
+                        y_col="tag_share",
+                        tag_col="tag_u",
+                        title=f"{p} - chance tags share trend",
+                        out_path=path_share_tr,
+                        topk=min(5, len(top_tags)),
+                    )
+                    images[p]["chance_share_trend"] = os.path.relpath(path_share_tr, start=os.path.dirname(report_assets_dir))
 
-        return all_tags
+        return images
 
-    def _generate_summary(self, platforms_data):
-        """生成趋势总结"""
-        summary = {
-            'overall_top_tags': [],
-            'cross_platform_trends': [],
-            'recommendations': []
-        }
+    def run(self, args: AnalyzerArgs) -> tuple[str, str]:
+        """
+        返回 (md_text, report_path)
+        """
+        conn = connect_sqlite(args.db_path)
 
-        # 合并所有平台的标签
-        all_tags = []
-        for platform, data in platforms_data.items():
-            for tag_info in data.get('top_tags', []):
-                all_tags.append((tag_info['tag'], tag_info['count'], platform))
+        df = load_rank_long_df(
+            conn,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            platform=args.platform,
+            rank_family=args.rank_family,
+            rank_sub_cat=args.rank_sub_cat,
+        )
 
-        # 计算总体热门标签
-        tag_counter = Counter()
-        for tag, count, _ in all_tags:
-            tag_counter[tag] += count
+        # heat + unify tag/week
+        df = add_heat(df, self.heat_cfg)
+        df = add_unified_columns(df)
 
-        summary['overall_top_tags'] = [{'tag': tag, 'count': count}
-                                       for tag, count in tag_counter.most_common(10)]
+        # weekly panel + rollup
+        weekly = compute_weekly_tag_panel(df, self.metric_cfg)
+        roll = compute_timewindow_rollup(weekly, self.metric_cfg)
 
-        # 生成写作建议
-        summary['recommendations'] = self._generate_writing_recommendations(tag_counter)
+        # extra blocks
+        new_entry_compact = compute_new_entry_ratio_compact(df, args.start_date, args.end_date)
+        pairs2 = compute_cooccurrence_pairs(df, self.metric_cfg)
+        triples3 = compute_cooccurrence_triples(df, self.metric_cfg)
 
-        return summary
+        # report paths
+        report_id = args.report_id or f"{args.start_date}_{args.end_date}"
+        report_dir = args.report_dir
+        os.makedirs(report_dir, exist_ok=True)
 
-    def _generate_writing_recommendations(self, tag_counter):
-        """基于标签分析生成写作建议"""
-        recommendations = []
+        report_path = os.path.join(report_dir, f"final_report_{report_id}.md")
 
-        top_tags = [tag for tag, _ in tag_counter.most_common(5)]
+        # assets dir: outputs/reports/assets/<report_id>/
+        assets_dir = os.path.join(report_dir, "assets", report_id)
+        os.makedirs(assets_dir, exist_ok=True)
 
-        if '玄幻' in top_tags or '仙侠' in top_tags:
-            recommendations.append({
-                'type': '题材建议',
-                'content': '当前玄幻/仙侠题材热度较高，可以考虑创作相关题材，注意创新世界观设定'
-            })
+        # generate images (relative paths for md)
+        # 注意：report_path 在 report_dir 下，assets_dir 在 report_dir/assets/<id>
+        # 我们在 report.py 里直接用 rel path 写入 md
+        images = {"fanqie": {}, "qidian": {}}
+        try:
+            images = self._make_assets(
+                weekly=weekly,
+                roll=roll,
+                report_assets_dir=assets_dir,
+                topk=args.top_k,
+            )
+            # 修正 relpath 计算：以上函数用 dirname(assets_dir) 作为 base，
+            # 这里统一改成相对于 report_dir（md 所在目录）更稳妥
+            # => 重新计算一遍
+            for p in ["fanqie", "qidian"]:
+                fixed = {}
+                for k, abs_or_rel in images[p].items():
+                    # abs_or_rel 可能已是相对路径，转成绝对后再相对
+                    ap = abs_or_rel
+                    if not os.path.isabs(ap):
+                        ap = os.path.join(os.path.dirname(assets_dir), abs_or_rel)
+                    fixed[k] = os.path.relpath(ap, start=report_dir)
+                images[p] = fixed
+        except Exception:
+            # 可视化失败不阻断报告生成
+            images = None
 
-        if '都市' in top_tags or '言情' in top_tags:
-            recommendations.append({
-                'type': '题材建议',
-                'content': '现实题材依然受欢迎，可以考虑加入职业元素、甜宠或职场情节'
-            })
+        md = build_final_report(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            weekly=weekly,
+            roll=roll,
+            new_entry_compact=new_entry_compact,
+            pairs2=pairs2,
+            triples3=triples3,
+            images=images,
+            cfg=ReportConfig(top_k=args.top_k),
+        )
 
-        if '科幻' in top_tags:
-            recommendations.append({
-                'type': '题材建议',
-                'content': '科幻题材有稳定受众，可以考虑软科幻或近未来设定，降低阅读门槛'
-            })
+        # write md
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(md)
 
-        if len(top_tags) > 0:
-            tag_combinations = []
-            for i in range(len(top_tags)):
-                for j in range(i + 1, len(top_tags)):
-                    tag_combinations.append(f"{top_tags[i]}+{top_tags[j]}")
-
-            if tag_combinations:
-                recommendations.append({
-                    'type': '融合建议',
-                    'content': f'可以考虑题材融合，如：{", ".join(tag_combinations[:3])}等组合'
-                })
-
-        recommendations.append({
-            'type': '通用建议',
-            'content': '无论选择什么题材，人物塑造和故事情节是关键，建议前3章快速建立冲突'
-        })
-
-        return recommendations
-
-    def analyze_monthly_trends(self, year_month=None):
-        """分析月度趋势"""
-        if not year_month:
-            year_month = datetime.now().strftime('%Y-%m')
-
-        start_date = f"{year_month}-01"
-
-        # 计算结束日期
-        year, month = map(int, year_month.split('-'))
-        if month == 12:
-            end_date = f"{year}-12-31"
-        else:
-            end_date = f"{year}-{month + 1:02d}-01"
-            end_date = (datetime.strptime(end_date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
-
-        monthly_report = {
-            'period': year_month,
-            'date_range': f"{start_date} 至 {end_date}",
-            'platform_analysis': {},
-            'trend_changes': []
-        }
-
-        # 获取月度数据
-        for platform in ['qidian', 'fanqie']:
-            trend_data = self.db_handler.get_trend_data(start_date, end_date, platform)
-
-            if not trend_data.empty:
-                platform_analysis = self._analyze_monthly_platform(trend_data, platform)
-                monthly_report['platform_analysis'][platform] = platform_analysis
-
-        # 分析趋势变化
-        monthly_report['trend_changes'] = self._analyze_trend_changes(monthly_report['platform_analysis'])
-
-        return monthly_report
-
-    def _analyze_monthly_platform(self, trend_data, platform):
-        """分析平台的月度数据"""
-        analysis = {
-            'platform': platform,
-            'total_days': trend_data['stat_date'].nunique(),
-            'tag_trends': {},
-            'stability_analysis': {}
-        }
-
-        # 分析标签趋势
-        pivot_data = trend_data.pivot_table(
-            index='stat_date',
-            columns='tag_name',
-            values='tag_percentage',
-            aggfunc='mean'
-        ).fillna(0)
-
-        # 计算标签的月度趋势
-        if not pivot_data.empty:
-            tag_trends = {}
-            for tag in pivot_data.columns:
-                tag_series = pivot_data[tag]
-                if tag_series.mean() > 0.5:  # 至少平均占0.5%
-                    trend = '上升' if tag_series.iloc[-1] > tag_series.iloc[0] else '下降'
-                    volatility = tag_series.std() / tag_series.mean() if tag_series.mean() > 0 else 0
-
-                    tag_trends[tag] = {
-                        'avg_percentage': float(tag_series.mean()),
-                        'trend': trend,
-                        'volatility': float(volatility),
-                        'peak': float(tag_series.max()),
-                        'trough': float(tag_series.min())
-                    }
-
-            analysis['tag_trends'] = dict(sorted(tag_trends.items(),
-                                                 key=lambda x: x[1]['avg_percentage'],
-                                                 reverse=True)[:15])
-
-        return analysis
-
-    def _analyze_trend_changes(self, platform_analysis):
-        """分析趋势变化"""
-        changes = []
-
-        # 这里可以添加更复杂的趋势变化分析逻辑
-        # 例如：识别新兴标签、衰退标签等
-
-        return changes
+        return md, report_path

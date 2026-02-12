@@ -490,3 +490,29 @@ SCHEDULER = {
     # 触发前的轻微抖动（避免卡在整点）
     "jitter_sec": 5,
 }
+
+ANALYSIS_CONFIG = {
+    "top_k": 30,
+    "rank_scale": 1.0,
+    "metric_scale": 1.0,
+    "metric_transform": "log1p",
+    "prefer_primary_title": True,
+
+    # key: "{platform}:{rank_family}:{rank_sub_cat}"
+    # rank_sub_cat 为空时写空字符串即可（末尾保留冒号）
+    "list_weights": {
+        "qidian:月票榜:": 1.2,
+        "qidian:畅销榜:": 1.0,
+        "qidian:推荐榜:": 0.9,
+
+        "fanqie:阅读榜:科幻末世": 1.1,
+        "fanqie:阅读榜:都市高武": 1.0,
+        "fanqie:阅读榜:悬疑脑洞": 1.0,
+        "fanqie:新书榜:": 0.9,
+
+        # fallback
+        "fanqie:阅读榜": 1.0,
+        "qidian": 1.0,
+    },
+}
+

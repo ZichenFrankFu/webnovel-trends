@@ -20,8 +20,11 @@ matplotlib>=3.7.0
 seaborn>=0.12.0
 wordcloud>=1.9.0
 jieba>=0.42.0
+openpyxl>=3.1
 
 # utils
 python-dateutil>=2.8.2
 tqdm>=4.66.0
 fonttools>=4.61.1
+
+
