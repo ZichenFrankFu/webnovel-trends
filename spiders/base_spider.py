@@ -21,6 +21,8 @@ from selenium.common.exceptions import InvalidSessionIdException, WebDriverExcep
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import config
+import undetected_chromedriver as uc
+
 
 class AntiBotDetectedException(Exception):
     """反爬虫检测异常"""
@@ -297,45 +299,50 @@ class BaseSpider(ABC):
         site_specific = (self.site_config or {}).get("selenium_specific", {}) or {}
         return self._deep_merge_dict(base, site_specific)
 
+    import undetected_chromedriver as uc
+    import random
+    import time
+
     def _init_driver(self) -> bool:
+        """
+        使用 undetected_chromedriver 初始化驱动，兼容 Chrome 144/145+
+        """
         try:
             cfg = self.selenium_config or {}
             if not cfg.get("enabled", True):
                 self.logger.info("Selenium disabled by config.")
                 return False
 
-            browser = (cfg.get("browser") or "chrome").lower()
-            if browser != "chrome":
-                raise ValueError(f"Unsupported browser: {browser}")
+            # ---------- 可选：启动时清理驱动缓存（只运行一次）----------
+            # if not hasattr(self, '_cache_cleaned'):
+            #     import shutil
+            #     shutil.rmtree(os.path.expanduser("~/.undetected_chromedriver"), ignore_errors=True)
+            #     self._cache_cleaned = True
+            # ---------------------------------------------------------
 
-            options = Options()
-
-            # ----- chrome arguments from cfg["options"] -----
+            # 1. 创建 uc 专用的 ChromeOptions
+            options = uc.ChromeOptions()
             opt_cfg = cfg.get("options", {}) or {}
 
-            headless = bool(opt_cfg.get("headless", True))
+            # headless 模式（强烈建议 False）
+            headless = bool(opt_cfg.get("headless", False))
             if headless:
                 options.add_argument("--headless=new")
 
+            # 窗口大小
             if opt_cfg.get("window_size"):
                 options.add_argument(f"--window-size={opt_cfg['window_size']}")
 
+            # User-Agent
             if opt_cfg.get("user_agent"):
-                user_agent = opt_cfg['user_agent']
-
-                # 如果是元组或列表，随机选择一个
-                if isinstance(user_agent, (tuple, list)) and len(user_agent) > 0:
-                    import random
-                    selected_ua = random.choice(user_agent)
+                ua = opt_cfg['user_agent']
+                if isinstance(ua, (tuple, list)):
+                    selected_ua = random.choice(ua)
                     options.add_argument(f"user-agent={selected_ua}")
-                    self.logger.info(f"随机选择User-Agent: {selected_ua[:50]}...")
-                elif isinstance(user_agent, str):
-                    # 如果是字符串，直接使用
-                    options.add_argument(f"user-agent={user_agent}")
-                else:
-                    self.logger.warning(f"无效的User-Agent配置类型: {type(user_agent)}")
+                elif isinstance(ua, str):
+                    options.add_argument(f"user-agent={ua}")
 
-            # add all remaining items as flags
+            # 其他命令行参数
             for k, v in opt_cfg.items():
                 if k in {"headless", "window_size", "user_agent"}:
                     continue
@@ -344,80 +351,53 @@ class BaseSpider(ABC):
                     if v:
                         options.add_argument(flag)
                 elif isinstance(v, str):
-                    # allow either "--k=v" style or special cases
                     options.add_argument(f"{flag}={v}")
                 elif v is not None:
                     options.add_argument(f"{flag}={v}")
 
-            # ----- experimental options -----
+            # 2. 实验性选项（跳过与 uc 冲突的项）
             for k, v in (cfg.get("experimental_options", {}) or {}).items():
+                if k in ("excludeSwitches", "useAutomationExtension"):
+                    self.logger.debug(f"跳过 experimental_option '{k}' (与 uc 不兼容)")
+                    continue
                 options.add_experimental_option(k, v)
 
-            # ----- prefs (perf etc.) -----
+            # 3. 用户偏好设置
             prefs = cfg.get("prefs")
             if isinstance(prefs, dict) and prefs:
                 options.add_experimental_option("prefs", prefs)
 
-            # ----- stealth -----
-            stealth = cfg.get("stealth", {}) or {}
-            if stealth.get("enabled", True):
-                if stealth.get("disable_blink_features"):
-                    options.add_argument(
-                        f"--disable-blink-features={stealth['disable_blink_features']}"
-                    )
-                # allow overriding these in stealth block
-                if stealth.get("excludeSwitches"):
-                    options.add_experimental_option("excludeSwitches", stealth["excludeSwitches"])
-                if "useAutomationExtension" in stealth:
-                    options.add_experimental_option("useAutomationExtension", stealth["useAutomationExtension"])
-
-            # ----- anti-antibot -----
+            # 4. 代理配置
             use_proxy = bool((getattr(self.config, "CRAWLER_CONFIG", {}) or {}).get("use_proxy", False))
             if use_proxy and self.current_proxy:
                 options.add_argument(f"--proxy-server={self.current_proxy}")
-                self.logger.info(f"[proxy] using proxy-server={self.current_proxy}")
 
-            # ----- driver service -----
-            driver_path = cfg.get("driver_path")
-            auto_install = bool(cfg.get("auto_install_driver", True))
+            # 5. 启动 undetected_chromedriver（兼容版本处理）
+            try:
+                # 🔥 关键修改：指定当前 Chrome 主版本 144
+                self.driver = uc.Chrome(
+                    options=options,
+                    version_main=144  # 根据你的 Chrome 版本填写（144/145/...）
+                )
+            except Exception as e:
+                self.logger.warning(f"指定 version_main=144 失败，尝试自动匹配: {e}")
+                self.driver = uc.Chrome(options=options)  # 自动匹配
 
-            if driver_path and os.path.exists(driver_path):
-                service = Service(driver_path)
-            else:
-                if not auto_install:
-                    raise FileNotFoundError(
-                        "driver_path not found and auto_install_driver is False"
-                    )
-                if ChromeDriverManager is None:
-                    raise RuntimeError(
-                        "webdriver_manager not installed, cannot auto install chromedriver"
-                    )
-                service = Service(ChromeDriverManager().install())
-
-            self.driver = webdriver.Chrome(service=service, options=options)
-
+            # 6. 设置超时
             self.driver.set_page_load_timeout(int(cfg.get("page_load_timeout", 30)))
             self.driver.implicitly_wait(int(cfg.get("implicit_wait", 10)))
 
-            # webdriver undefined script
-            script = stealth.get("webdriver_undefined_script")
-            if stealth.get("enabled", True) and script:
-                self.driver.execute_script(script)
-
-            self._apply_stealth_js()
-            self.logger.info(f"{self.__class__.__name__} Selenium driver initialized.")
+            self.logger.info(f"{self.__class__.__name__} undetected_chromedriver 初始化成功")
             return True
 
         except Exception as e:
-            self.logger.error(f"Selenium init failed: {e}")
-
+            self.logger.error(f"undetected_chromedriver 初始化失败: {e}")
+            # 重试逻辑
             retry_cfg = (self.selenium_config or {}).get("retry", {}) or {}
             if not retry_cfg.get("enabled", True):
                 return False
-
             max_retries = int(retry_cfg.get("max_retries", 3))
             backoff = float(retry_cfg.get("backoff_seconds", 2))
-
             if getattr(self, "retry_count", 0) < max_retries:
                 self.retry_count = getattr(self, "retry_count", 0) + 1
                 time.sleep(backoff)
