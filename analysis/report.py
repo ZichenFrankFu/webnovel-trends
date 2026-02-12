@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import os
-import numpy as np
-import pandas as pd
 from datetime import datetime
 from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
 
 
 @dataclass(frozen=True)
@@ -14,9 +15,7 @@ class ReportConfig:
 
 
 def _nan_to_dash(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    避免 markdown 输出 'nan'；把 NaN/None 统一显示为 '-'
-    """
+    """Avoid 'nan' in markdown output; show '-' instead."""
     out = df.copy()
     for c in out.columns:
         if pd.api.types.is_numeric_dtype(out[c]):
@@ -29,15 +28,28 @@ def _nan_to_dash(df: pd.DataFrame) -> pd.DataFrame:
 def md_table(df: pd.DataFrame, max_rows: int = 20) -> str:
     if df is None or df.empty:
         return "\n（无数据）\n"
-    return _nan_to_dash(df.head(max_rows)).to_markdown(index=False)
+    # Avoid duplicated rows in report tables (usually caused by upstream joins/rollups)
+    # Only remove fully identical rows; keep distinct records.
+    dd = df.drop_duplicates().reset_index(drop=True)
+    return _nan_to_dash(dd.head(max_rows)).to_markdown(index=False)
 
 
-def build_cross_platform_diff(roll: pd.DataFrame) -> pd.DataFrame:
+def _safe_subcat(x) -> str:
+    if x is None or (isinstance(x, float) and pd.isna(x)) or str(x).strip() == "":
+        return "（未分组/ALL）"
+    return str(x)
+
+
+def _norm_subcat(series: pd.Series) -> pd.Series:
+    """Normalize rank_sub_cat so empty-string and NaN collapse into the same label."""
+    s = series.fillna("").astype(str).map(lambda x: x.strip())
+    return s.replace({"": "（未分组/ALL）"})
+
+def build_cross_platform_diff_by_tag(roll: pd.DataFrame) -> pd.DataFrame:
     """
-    跨平台差异：
-    - share 缺失视为 0（表示该平台没出现）
-    - heat/rank diff 仅对 presence=both 计算，避免 qidian_only/fanqie_only 误导
-    - 保留 presence 字段方便解释
+    Cross-platform diff for TAG view (tag_u).
+    - share missing -> 0 (not present on that platform)
+    - heat/rank diff only for presence=both
     """
     agg = roll.groupby(["platform", "tag_u"], dropna=False).agg(
         mean_share=("mean_share", "mean"),
@@ -58,12 +70,10 @@ def build_cross_platform_diff(roll: pd.DataFrame) -> pd.DataFrame:
     diff.loc[diff["share_qidian"].isna() & diff["share_fanqie"].notna(), "presence"] = "fanqie_only"
     diff.loc[diff["share_fanqie"].isna() & diff["share_qidian"].notna(), "presence"] = "qidian_only"
 
-    # share 缺失=0
     diff["share_qidian"] = diff["share_qidian"].fillna(0.0)
     diff["share_fanqie"] = diff["share_fanqie"].fillna(0.0)
     diff["share_diff"] = diff["share_qidian"] - diff["share_fanqie"]
 
-    # heat/rank diff：只对 both 才算
     diff["heat_diff"] = np.where(
         diff["presence"] == "both",
         diff["heat_qidian"] - diff["heat_fanqie"],
@@ -74,88 +84,210 @@ def build_cross_platform_diff(roll: pd.DataFrame) -> pd.DataFrame:
         diff["rank_qidian"] - diff["rank_fanqie"],
         np.nan
     )
-
     return diff
 
 
-def _topk_by_platform(df: pd.DataFrame, sort_col: str, topk: int, ascending: bool = False) -> dict[str, pd.DataFrame]:
-    out: dict[str, pd.DataFrame] = {}
-    for p in ["fanqie", "qidian"]:
-        sub = df[df["platform"] == p].sort_values(sort_col, ascending=ascending).head(topk)
-        out[p] = sub
-    return out
-
-
-def _recompute_life_stage_tag_level(r: pd.DataFrame) -> pd.DataFrame:
+def build_cross_platform_diff_by_category(roll_cat: pd.DataFrame) -> pd.DataFrame:
     """
-    roll 聚合到 (platform, tag_u) 后，重新判定 life_stage，避免同一 tag 在不同榜单产生多个 stage。
+    Cross-platform diff for CATEGORY view (cat_u) — comparable across platforms.
+    Same behavior as tag diff.
     """
-    def stage_row(row) -> tuple[str, str]:
-        weeks = row.get("weeks", np.nan)
-        ms = row.get("mean_share", np.nan)
-        mr = row.get("mean_rank", np.nan)
-        ss = row.get("share_slope", np.nan)
-        hs = row.get("heat_slope", np.nan)
-
-        # 单周：用水平判断
-        if pd.isna(weeks) or weeks < 2:
-            if (pd.notna(ms) and ms >= 0.15) or (pd.notna(mr) and mr <= 10):
-                return "单周快照-强势", "level"
-            if pd.notna(ms) and ms >= 0.05:
-                return "单周快照-中等", "level"
-            return "单周快照-长尾", "level"
-
-        # 多周：用趋势判断；缺 slope 仍给可读结果
-        if pd.isna(ss) or pd.isna(hs):
-            if pd.notna(ms) and ms >= 0.10:
-                return "成熟(缺趋势)", "level"
-            return "过渡(缺趋势)", "level"
-
-        if ss > 0 and hs > 0:
-            return "成长", "slope"
-        if ss < 0 and hs < 0:
-            return "衰退", "slope"
-        if pd.notna(ms) and ms >= 0.10 and abs(ss) < 1e-3 and abs(hs) < 1e-3:
-            return "成熟", "slope"
-        return "过渡", "slope"
-
-    out = r.copy()
-    out[["life_stage", "stage_basis"]] = out.apply(lambda rr: pd.Series(stage_row(rr)), axis=1)
-    return out
-
-
-def _roll_tag_level(roll: pd.DataFrame) -> pd.DataFrame:
-    """
-    关键修复：
-    原 roll 粒度是 (platform, rank_family, rank_sub_cat, tag_u)，导致同一 tag_u 会重复出现在 TopK。
-    这里统一聚合成 (platform, tag_u) 粒度，用于所有 TopK 表与可视化。
-    """
-    # 用 mean 聚合大多数指标；weeks 用 max（窗口长度只要最大即可）
-    cols = set(roll.columns)
-
-    def _pick(col: str, default=np.nan):
-        return col if col in cols else default
-
-    r = roll.groupby(["platform", "tag_u"], dropna=False).agg(
-        weeks=("weeks", "max") if "weeks" in cols else ("tag_u", "count"),
-        mean_rank=("mean_rank", "mean") if "mean_rank" in cols else ("avg_rank", "mean"),
-        rank_std=("rank_std", "mean") if "rank_std" in cols else ("rank", "std"),
-        mean_share=("mean_share", "mean") if "mean_share" in cols else ("tag_share", "mean"),
-        avg_heat=("avg_heat", "mean") if "avg_heat" in cols else ("avg_heat_raw", "mean"),
-        median_heat=("median_heat", "median") if "median_heat" in cols else ("avg_heat_raw", "median"),
-        heat_volatility=("heat_volatility", "mean") if "heat_volatility" in cols else ("avg_heat_raw", "std"),
-        mean_efficiency=("mean_efficiency", "mean") if "mean_efficiency" in cols else ("efficiency", "mean"),
-        mean_head_ratio=("mean_head_ratio", "mean") if "mean_head_ratio" in cols else ("head_ratio", "mean"),
-        mean_entry_threshold=("mean_entry_threshold", "mean") if "mean_entry_threshold" in cols else ("entry_threshold", "mean"),
-        rank_slope=("rank_slope", "mean") if "rank_slope" in cols else ("avg_rank", "mean"),
-        share_slope=("share_slope", "mean") if "share_slope" in cols else ("tag_share", "mean"),
-        heat_slope=("heat_slope", "mean") if "heat_slope" in cols else ("avg_heat_raw", "mean"),
-        top_appearance_ratio=("top_appearance_ratio", "mean") if "top_appearance_ratio" in cols else ("tag_u", "count"),
+    agg = roll_cat.groupby(["platform", "cat_u"], dropna=False).agg(
+        mean_share=("mean_share", "mean"),
+        avg_heat=("avg_heat", "mean"),
+        mean_rank=("mean_rank", "mean"),
     ).reset_index()
 
-    # 重新计算生命周期（tag-level）
-    r = _recompute_life_stage_tag_level(r)
-    return r
+    q = agg[agg["platform"] == "qidian"].rename(columns={
+        "mean_share": "share_qidian", "avg_heat": "heat_qidian", "mean_rank": "rank_qidian"
+    }).drop(columns=["platform"])
+    f = agg[agg["platform"] == "fanqie"].rename(columns={
+        "mean_share": "share_fanqie", "avg_heat": "heat_fanqie", "mean_rank": "rank_fanqie"
+    }).drop(columns=["platform"])
+
+    diff = q.merge(f, on="cat_u", how="outer")
+
+    diff["presence"] = "both"
+    diff.loc[diff["share_qidian"].isna() & diff["share_fanqie"].notna(), "presence"] = "fanqie_only"
+    diff.loc[diff["share_fanqie"].isna() & diff["share_qidian"].notna(), "presence"] = "qidian_only"
+
+    diff["share_qidian"] = diff["share_qidian"].fillna(0.0)
+    diff["share_fanqie"] = diff["share_fanqie"].fillna(0.0)
+    diff["share_diff"] = diff["share_qidian"] - diff["share_fanqie"]
+
+    diff["heat_diff"] = np.where(
+        diff["presence"] == "both",
+        diff["heat_qidian"] - diff["heat_fanqie"],
+        np.nan
+    )
+    diff["rank_diff"] = np.where(
+        diff["presence"] == "both",
+        diff["rank_qidian"] - diff["rank_fanqie"],
+        np.nan
+    )
+    return diff
+
+
+def _explain_sampling() -> str:
+    return (
+        "### 抽样机制说明（非常重要）\n\n"
+        "- **起点**：混合榜/全站竞争（榜单样本更接近“市场主赛道竞争结果”）。\n"
+        "- **番茄**：分类榜/子类竞争（榜单样本更接近条件分布 `P(书 | 子分类榜)`）。\n\n"
+        "因此：\n"
+        "- 起点可以直接统计 **分类占比** 来描述“市场竞争结构”；\n"
+        "- 番茄不应把不同子分类榜直接混在一起当“市场份额”，应优先做**分类榜结构**与**分类内 top tags**。\n"
+    )
+
+def _explain_cross_platform_diff() -> str:
+    return (
+        "### 如何解读“跨平台差异”\n"
+        "- **presence**：该分类/标签在窗口内出现的平台范围：`both`/`qidian_only`/`fanqie_only`。\n"
+        "- **share_qidian / share_fanqie**：窗口内平均占比（在各自平台内归一化后的份额），用于衡量“在平台内部有多常见”。\n"
+        "- **share_diff = share_qidian - share_fanqie**：为正表示该分类/标签在起点相对更强，为负表示在番茄相对更强。\n"
+        "- **heat_diff / rank_diff**：仅在 `presence=both` 时有意义。\n"
+        "  - **heat_diff = heat_qidian - heat_fanqie**：为正表示起点侧平均热度更高。\n"
+        "  - **rank_diff = rank_qidian - rank_fanqie**：注意 rank 越小越靠前；因此 **rank_diff 为负**通常表示起点侧排名更好。\n"
+        "\n"
+        "> 说明：起点榜单是混合竞争样本；番茄榜单是分类榜条件样本。\n"
+        "> 因此跨平台对比优先使用 **cat_u（main_category）** 这一可比口径；`tag_u` 仅作为补充参考。\n"
+    )
+
+
+def _explain_concentration() -> str:
+    return (
+        "### 指标解释：concentration_index（集中度）\n\n"
+        "本报告的 `concentration_index` 采用与 HHI 类似的定义：\n"
+        "- 在同一周、同一榜单分组（rank_family + rank_sub_cat）内，先计算每个 tag（或分类）的占比 `s_i`；\n"
+        "- 再计算 `Σ s_i^2`。\n\n"
+        "含义：\n"
+        "- **越接近 1**：越集中（少数 tag/分类占据大部分上榜位，同质化更强）；\n"
+        "- **越接近 0**：越分散（题材更丰富，长尾更明显）。\n"
+    )
+
+
+def _section_platform_topk(roll: pd.DataFrame, platform: str, top_k: int) -> str:
+    r = roll[roll["platform"] == platform].copy()
+    if r.empty:
+        return f"## {platform}\n\n（无数据）\n"
+
+    # IMPORTANT:
+    # roll is keyed by (platform, rank_family, rank_sub_cat, tag_u) in analyzer.
+    # For mixed-rank platforms (qidian), the same tag_u can appear multiple times across rank lists.
+    # We aggregate to one row per tag_u to avoid duplicated rows in Top tables.
+    r = r.dropna(subset=["tag_u"]).copy()
+
+    # collapse rank_family/rank_sub_cat so each tag_u appears once
+    agg = r.groupby(["tag_u"], dropna=False).agg(
+        mean_share=("mean_share", "mean"),
+        avg_heat=("avg_heat", "mean"),
+        mean_rank=("mean_rank", "mean"),
+        weeks=("weeks", "max"),
+    ).reset_index()
+
+    # For reference/debugging, you can keep how many rank groups contributed:
+    # agg["n_rank_groups"] = r.groupby("tag_u").size().values
+
+    top_share = agg.sort_values("mean_share", ascending=False)[
+        ["tag_u", "mean_share", "avg_heat", "mean_rank", "weeks"]
+    ].head(top_k)
+
+    top_heat = agg.sort_values("avg_heat", ascending=False)[
+        ["tag_u", "avg_heat", "mean_share", "mean_rank", "weeks"]
+    ].head(top_k)
+
+    out = [f"## {platform}\n"]
+    out.append("### Top tags by mean_share\n")
+    out.append(md_table(top_share, max_rows=top_k))
+    out.append("\n### Top tags by avg_heat\n")
+    out.append(md_table(top_heat, max_rows=top_k))
+    return "\n".join(out)
+def _section_images(images: dict[str, dict[str, str]] | None) -> str:
+    if not images:
+        return ""
+    out = ["## 可视化\n"]
+    for p in ["qidian", "fanqie"]:
+        if p not in images or not images[p]:
+            continue
+        out.append(f"### {p}\n")
+        for k, path in images[p].items():
+            out.append(f"- {k}: ![]({path})")
+        out.append("")
+    return "\n".join(out)
+
+
+def _fanqie_rank_structure(weekly: pd.DataFrame) -> pd.DataFrame:
+    """
+    构造番茄“分类榜结构”表：
+    每个 (rank_family, rank_sub_cat) 汇总：
+      - mean_books: 每周平均上榜书数（去重后）
+      - avg_heat: 每周平均热度
+      - entry_threshold: 平均入榜门槛
+      - concentration_index: 平均集中度
+      - weeks: 覆盖周数
+    """
+    w = weekly[weekly["platform"] == "fanqie"].copy()
+    if w.empty:
+        return pd.DataFrame()
+
+    # weekly 为 tag 面板：按榜单层聚合（去掉 tag_u 维）
+    w["rank_sub_cat_norm"] = _norm_subcat(w["rank_sub_cat"])
+
+    gb = w.groupby(["rank_family", "rank_sub_cat_norm", "week"], dropna=False).agg(
+        books=("book_count", "sum"),
+        avg_heat=("avg_heat_raw", "mean"),
+        entry_threshold=("entry_threshold", "mean"),
+        concentration_index=("concentration_index", "mean"),
+    ).reset_index()
+
+    out = gb.groupby(["rank_family", "rank_sub_cat_norm"], dropna=False).agg(
+        mean_books=("books", "mean"),
+        avg_heat=("avg_heat", "mean"),
+        entry_threshold=("entry_threshold", "mean"),
+        concentration_index=("concentration_index", "mean"),
+        weeks=("week", "nunique"),
+    ).reset_index()
+
+    out = out.rename(columns={"rank_sub_cat_norm": "rank_sub_cat"})
+    out = out.sort_values(["avg_heat", "mean_books"], ascending=False)
+    return out
+
+
+def _fanqie_top_tags_by_subcat(weekly: pd.DataFrame, top_groups: int = 3, top_k: int = 10) -> str:
+    w = weekly[weekly["platform"] == "fanqie"].copy()
+    if w.empty:
+        return "（无数据）\n"
+
+    # 选最“重”的榜单组（按 avg_heat & books）
+    struct = _fanqie_rank_structure(weekly)
+    if struct.empty:
+        return "（无数据）\n"
+    pick = struct.head(top_groups)[["rank_family", "rank_sub_cat"]].to_dict("records")
+
+    out = []
+    for g in pick:
+        rf = g["rank_family"]
+        sub = g["rank_sub_cat"]
+        # 注意：rank_sub_cat 已在结构表中归一化为“（未分组/ALL）”等；这里用同样的归一化口径筛选
+        ww = w.copy()
+        ww["rank_sub_cat_norm"] = _norm_subcat(ww["rank_sub_cat"])
+        wt = ww[(ww["rank_family"] == rf) & (ww["rank_sub_cat_norm"] == sub)].copy()
+        if wt.empty:
+            continue
+
+        # 分类内 top tags：用 mean(tag_share)
+        tt = wt.groupby("tag_u", dropna=False).agg(
+            mean_share=("tag_share", "mean"),
+            avg_heat=("avg_heat_raw", "mean"),
+            mean_rank=("avg_rank", "mean"),
+            weeks=("week", "nunique"),
+        ).reset_index().dropna(subset=["tag_u"])
+
+        tt = tt.sort_values("mean_share", ascending=False).head(top_k)
+
+        out.append(f"#### {rf}·{sub} - Top tags\n")
+        out.append(md_table(tt[["tag_u", "mean_share", "avg_heat", "mean_rank", "weeks"]], max_rows=top_k))
+        out.append("")
+    return "\n".join(out) if out else "（无数据）\n"
 
 
 def build_final_report(
@@ -164,160 +296,78 @@ def build_final_report(
     end_date: str,
     weekly: pd.DataFrame,
     roll: pd.DataFrame,
-    new_entry_compact: pd.DataFrame | None,
-    pairs2: pd.DataFrame | None,
-    triples3: pd.DataFrame | None,
-    images: dict[str, dict[str, str]] | None,   # images[platform][key] = relative_path
-    cfg: ReportConfig,
+    weekly_cat: pd.DataFrame | None = None,
+    roll_cat: pd.DataFrame | None = None,
+    new_entry_compact: pd.DataFrame | None = None,
+    pairs2: pd.DataFrame | None = None,
+    triples3: pd.DataFrame | None = None,
+    images: dict[str, dict[str, str]] | None = None,   # images[platform][key] = relative_path
+    cfg: ReportConfig = ReportConfig(),
 ) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    topk = cfg.top_k
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # ✅ 关键修复：roll → (platform, tag_u) 聚合，避免 TopK 重复 tag
-    r = _roll_tag_level(roll)
+    md: list[str] = []
+    md.append(f"# WebNovel Trend Report ({start_date} ~ {end_date})\n")
+    md.append(f"_Generated: {now}_\n")
+    md.append(_explain_sampling())
 
-    # 综合分（平台内排序用）
-    r["safe_score"] = (1.0 / r["mean_rank"].replace(0, np.nan)) + r["top_appearance_ratio"].fillna(0) - r["rank_std"].fillna(0)
-    r["chance_score"] = (-r["rank_slope"].fillna(0)) + r["heat_slope"].fillna(0) + r["share_slope"].fillna(0)
-    r["blue_score"] = r["mean_efficiency"].fillna(0) - r["mean_share"].fillna(0)
-    r["risk_score"] = r["heat_volatility"].fillna(0) + r["rank_std"].fillna(0)
+    # Quick stats
+    md.append("## 数据覆盖\n")
+    if roll is not None and not roll.empty:
+        cov = roll.groupby("platform")["weeks"].max().reset_index().rename(columns={"weeks": "max_weeks_in_window"})
+        md.append(md_table(cov, max_rows=10))
+    else:
+        md.append("（无数据）\n")
 
-    # 关键榜单（列精简：保留解释所需的最少列）
-    cols_safe = ["platform", "tag_u", "weeks", "mean_rank", "rank_std", "rank_slope", "top_appearance_ratio", "mean_share", "avg_heat", "mean_efficiency", "safe_score"]
-    cols_chance = ["platform", "tag_u", "weeks", "mean_rank", "rank_slope", "share_slope", "heat_slope", "mean_share", "avg_heat", "chance_score"]
-    cols_share = ["platform", "tag_u", "weeks", "mean_share", "mean_rank", "avg_heat", "mean_efficiency"]
-    cols_heat = ["platform", "tag_u", "weeks", "avg_heat", "median_heat", "mean_rank", "mean_share"]
-    cols_comp = ["platform", "tag_u", "weeks", "mean_efficiency", "mean_share", "mean_head_ratio", "mean_entry_threshold", "avg_heat"]
-    cols_life = ["platform", "tag_u", "life_stage", "stage_basis", "mean_share", "share_slope", "heat_slope", "mean_rank", "weeks"]
-    cols_risk = ["platform", "tag_u", "weeks", "heat_volatility", "rank_std", "risk_score", "mean_share", "avg_heat"]
+    # Qidian/Fanqie tag view
+    md.append(_section_platform_topk(roll, "qidian", cfg.top_k))
+    md.append(_section_platform_topk(roll, "fanqie", cfg.top_k))
 
-    safe = r[cols_safe].sort_values("safe_score", ascending=False)
-    chance = r[cols_chance].sort_values("chance_score", ascending=False)
-    share = r[cols_share].sort_values("mean_share", ascending=False)
-    heat = r[cols_heat].sort_values("avg_heat", ascending=False)
-    comp = r[cols_comp].sort_values("mean_efficiency", ascending=False)
-    life = r[cols_life].sort_values(["platform", "life_stage", "mean_share"], ascending=[True, True, False])
-    risk = r[cols_risk].sort_values("risk_score", ascending=False)
+    # Fanqie structure
+    md.append("## 番茄：分类榜结构（按 rank_family + rank_sub_cat）\n")
+    struct = _fanqie_rank_structure(weekly)
+    md.append(md_table(struct, max_rows=30))
+    md.append(_explain_concentration())
 
-    safe_p = _topk_by_platform(safe, "safe_score", topk, ascending=False)
-    chance_p = _topk_by_platform(chance, "chance_score", topk, ascending=False)
-    share_p = _topk_by_platform(share, "mean_share", topk, ascending=False)
-    heat_p = _topk_by_platform(heat, "avg_heat", topk, ascending=False)
-    comp_p = _topk_by_platform(comp, "mean_efficiency", topk, ascending=False)
-    life_p = _topk_by_platform(life, "mean_share", topk, ascending=False)
-    risk_p = _topk_by_platform(risk, "risk_score", topk, ascending=False)
+    md.append("## 番茄：分类内 Top tags（按最热 Top3 分类榜）\n")
+    md.append(_fanqie_top_tags_by_subcat(weekly, top_groups=3, top_k=min(cfg.top_k, 10)))
 
-    # 跨平台差异（这里传入 tag-level 的 r，避免重复）
-    diff = build_cross_platform_diff(r).sort_values("share_diff", ascending=False).head(topk)
+    # Cross-platform diff: category (preferred)
+    if roll_cat is not None and not roll_cat.empty:
+        md.append("## 跨平台差异（分类口径：cat_u，可比）\n")
+        md.append(_explain_cross_platform_diff())
+        diffc = build_cross_platform_diff_by_category(roll_cat)
+        show = diffc.sort_values("share_diff", ascending=False)[
+            ["cat_u", "presence", "share_qidian", "share_fanqie", "share_diff", "heat_diff", "rank_diff"]
+        ]
+        md.append(md_table(show, max_rows=30))
+    else:
+        md.append("## 跨平台差异（分类口径：cat_u，可比）\n\n（无分类口径数据）\n")
 
-    parts: list[str] = []
-    parts.append("# WebNovel Trends – Final Report\n")
-    parts.append(f"- Generated at: {now}\n")
-    parts.append(f"- Range: {start_date} ~ {end_date}\n")
-    parts.append(f"- TopK: {topk}\n")
-    parts.append("\n---\n")
+    # Cross-platform diff: tag (supplementary)
+    md.append("## 跨平台差异（tag_u，补充参考）\n")
+    difft = build_cross_platform_diff_by_tag(roll)
+    show2 = difft.sort_values("share_diff", ascending=False)[
+        ["tag_u", "presence", "share_qidian", "share_fanqie", "share_diff", "heat_diff", "rank_diff"]
+    ]
+    md.append(md_table(show2, max_rows=30))
 
-    # 可视化（平台分开）
-    if images:
-        parts.append("## 0) 可视化速览\n")
-        for p in ["fanqie", "qidian"]:
-            if p not in images:
-                continue
-            parts.append(f"### {p}\n")
-            for k, rel_path in images[p].items():
-                parts.append(f"- {k}\n\n![]({rel_path})\n")
-        parts.append("\n---\n")
+    # New entry compact
+    md.append("## 新书驱动（created_date 落在窗口内）\n")
+    if new_entry_compact is None or new_entry_compact.empty:
+        md.append("（无数据）\n")
+    else:
+        md.append(md_table(new_entry_compact, max_rows=30))
 
-    # Safe / Chance
-    parts.append("## 1) Safe 题材（长期稳定高位）\n")
-    parts.append("### fanqie\n")
-    parts.append(md_table(safe_p["fanqie"], topk))
-    parts.append("\n### qidian\n")
-    parts.append(md_table(safe_p["qidian"], topk))
-    parts.append("\n---\n")
+    # Co-occurrence
+    md.append("## Tag 共现（pairs）\n")
+    md.append(md_table(pairs2, max_rows=30))
+    md.append("## Tag 共现（triples）\n")
+    md.append(md_table(triples3, max_rows=30))
 
-    parts.append("## 2) Chance 题材（上升最快）\n")
-    parts.append("### fanqie\n")
-    parts.append(md_table(chance_p["fanqie"], topk))
-    parts.append("\n### qidian\n")
-    parts.append(md_table(chance_p["qidian"], topk))
-    parts.append("\n---\n")
+    # Images
+    img_sec = _section_images(images)
+    if img_sec:
+        md.append(img_sec)
 
-    # Market share / Heat
-    parts.append("## 3) 题材占比 TopK（市场份额）\n")
-    parts.append("### fanqie\n")
-    parts.append(md_table(share_p["fanqie"], topk))
-    parts.append("\n### qidian\n")
-    parts.append(md_table(share_p["qidian"], topk))
-    parts.append("\n---\n")
-
-    parts.append("## 4) 热度 TopK（平台内热度强度）\n")
-    parts.append("### fanqie\n")
-    parts.append(md_table(heat_p["fanqie"], topk))
-    parts.append("\n### qidian\n")
-    parts.append(md_table(heat_p["qidian"], topk))
-    parts.append("\n---\n")
-
-    # Competition / Lifecycle / Risk
-    parts.append("## 5) 竞争与效率 TopK（更适合新作者的赛道线索）\n")
-    parts.append("### fanqie\n")
-    parts.append(md_table(comp_p["fanqie"], topk))
-    parts.append("\n### qidian\n")
-    parts.append(md_table(comp_p["qidian"], topk))
-    parts.append("\n---\n")
-
-    parts.append("## 6) 生命周期（tag-level：同一 tag 不重复）\n")
-    parts.append("### fanqie\n")
-    parts.append(md_table(life_p["fanqie"], topk))
-    parts.append("\n### qidian\n")
-    parts.append(md_table(life_p["qidian"], topk))
-    parts.append("\n---\n")
-
-    parts.append("## 7) 高风险题材（波动大）\n")
-    parts.append("### fanqie\n")
-    parts.append(md_table(risk_p["fanqie"], topk))
-    parts.append("\n### qidian\n")
-    parts.append(md_table(risk_p["qidian"], topk))
-    parts.append("\n---\n")
-
-    # New entry（精简列）
-    if new_entry_compact is not None and not new_entry_compact.empty:
-        parts.append("## 8) 新书驱动（平台扶持信号，按 platform+tag 聚合）\n")
-        for p in ["fanqie", "qidian"]:
-            parts.append(f"### {p}\n")
-            sub = new_entry_compact[new_entry_compact["platform"] == p].head(topk)
-            parts.append(md_table(sub[["platform", "tag_u", "total_books", "new_books", "new_entry_ratio"]], topk))
-        parts.append("\n---\n")
-
-    # Co-occur 2 / 3
-    if pairs2 is not None and not pairs2.empty:
-        parts.append("## 9) Fanqie Tags 二标签共现 TopK（爆款组合线索）\n")
-        parts.append(md_table(pairs2, topk))
-        parts.append("\n---\n")
-
-    if triples3 is not None and not triples3.empty:
-        parts.append("## 10) Fanqie Tags 三标签共现 TopK（组合升级）\n")
-        parts.append(md_table(triples3, topk))
-        parts.append("\n---\n")
-
-    parts.append("## 11) 跨平台差异（起点 vs 番茄题材偏好）\n")
-    parts.append(md_table(diff[[
-        "tag_u", "presence",
-        "share_qidian", "share_fanqie", "share_diff",
-        "heat_qidian", "heat_fanqie", "heat_diff",
-        "rank_qidian", "rank_fanqie", "rank_diff"
-    ]], topk))
-    parts.append("\n---\n")
-
-    parts.append("## 指标口径说明（摘要）\n")
-    parts.append("- heat_raw：番茄 reading_count，起点 total_recommend（按 platform 映射）。\n")
-    parts.append("- heat_mix：平台内 heat_pct（百分位） + robust z（MAD）压缩后混合，用于更稳健的排序。\n")
-    parts.append("- 起点以 main_category 作为 tag；番茄以 tags 表中的 tag_name 作为 tag。\n")
-
-    return "\n".join(parts)
-
-
-def write_report(md: str, out_path: str) -> None:
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(md)
+    return "\n".join(md)

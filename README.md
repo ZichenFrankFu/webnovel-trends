@@ -28,7 +28,7 @@ python main.py once
 ```bash
 python main.py once --platform qidian --rank_key 月票榜 --qidian_pages 5 --chapter_count 5
 python main.py once --platform fanqie --rank_key 新书榜科幻末世 --newbook_chapter_count 2
-python main.py once --platform fanqie --rank_key 阅读榜科幻末世 --chapter_count 5
+python main.py once --platform fanqie --rank_key 阅读榜玄幻脑洞 --chapter_count 5
 
 ```
 ### 2.3. 只抓某个平台（跑该平台所有榜单）

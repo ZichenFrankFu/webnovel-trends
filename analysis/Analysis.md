@@ -24,6 +24,17 @@ python run_analysis.py --db ../outputs/data/novels.db --start_date 2026-02-01 --
 默认建议使用 **weekly（按周统计）**，以减少日波动影响。
 ---
 
+
+# 0. 抽样机制差异（必须读）
+- **起点中文网**：混合榜（全站竞争），因此 `main_category` 的占比更接近“市场竞争结构”。
+- **番茄小说**：分类榜（每个 `rank_sub_cat` 单独竞争），跨 `rank_sub_cat` 聚合后的占比是“抽样设计结果”，不能直接当作市场份额。
+
+本项目为此做了两套口径：
+- `tag_u`：题材/标签口径（起点=main_category；番茄=tag_name），用于平台内选题与组合分析。
+- `cat_u`：跨平台对齐口径（两平台都取 novels.main_category），用于解释与跨平台差异表。
+
+报告中会额外输出番茄 `rank_sub_cat` 结构摘要，以及“分类内 Top tags”。
+---
 # 二、排名类指标（Ranking Metrics）
 
 排名指标用于分析题材在竞争结构中的地位。 它们回答的是：

@@ -175,18 +175,20 @@ WEBSITES = {
     'fanqie': {
         'name': '番茄小说',
         'rank_urls': {
-            '阅读榜西方奇幻': 'https://fanqienovel.com/rank/1_2_1141',     # 阅读榜西方奇幻
-            '阅读榜科幻末世': 'https://fanqienovel.com/rank/1_2_8',        # 阅读榜科幻末世
-            '阅读榜都市高武': 'https://fanqienovel.com/rank/1_2_1014',     # 阅读榜都市高武
-            '阅读榜悬疑脑洞': 'https://fanqienovel.com/rank/1_2_539',      # 阅读榜悬疑脑洞
-            '阅读榜都市脑洞': 'https://fanqienovel.com/rank/1_2_262',      # 阅读榜都市脑洞
-            '阅读榜动漫衍生': 'https://fanqienovel.com/rank/1_2_718',      # 阅读榜动漫衍生
-            '新书榜西方奇幻': 'https://fanqienovel.com/rank/1_1_1141',     # 新书榜西方奇幻
-            '新书榜科幻末世': 'https://fanqienovel.com/rank/1_1_8',        # 新书榜科幻末世
-            '新书榜都市高武': 'https://fanqienovel.com/rank/1_1_1014',     # 新书榜都市高武
-            '新书榜悬疑脑洞': 'https://fanqienovel.com/rank/1_1_539',      # 新书榜悬疑脑洞
-            '新书榜都市脑洞': 'https://fanqienovel.com/rank/1_1_262',      # 新书榜都市脑洞
-            '新书榜动漫衍生': 'https://fanqienovel.com/rank/1_1_718',      # 新书榜动漫衍生
+            '阅读榜西方奇幻': 'https://fanqienovel.com/rank/1_2_1141',
+            '阅读榜科幻末世': 'https://fanqienovel.com/rank/1_2_8',
+            '阅读榜都市高武': 'https://fanqienovel.com/rank/1_2_1014',
+            '阅读榜悬疑脑洞': 'https://fanqienovel.com/rank/1_2_539',
+            '阅读榜都市脑洞': 'https://fanqienovel.com/rank/1_2_262',
+            '阅读榜玄幻脑洞': 'https://fanqienovel.com/rank/1_2_257',
+            '阅读榜悬疑灵异': 'https://fanqienovel.com/rank/1_2_751',
+            '阅读榜动漫衍生': 'https://fanqienovel.com/rank/1_2_718',
+            '新书榜科幻末世': 'https://fanqienovel.com/rank/1_1_8',
+            '新书榜西方奇幻': 'https://fanqienovel.com/rank/1_1_1141',
+            '新书榜都市高武': 'https://fanqienovel.com/rank/1_1_1014',
+            '新书榜悬疑脑洞': 'https://fanqienovel.com/rank/1_1_539',
+            '新书榜都市脑洞': 'https://fanqienovel.com/rank/1_1_262',
+            '新书榜动漫衍生': 'https://fanqienovel.com/rank/1_1_718',
         },
         "rank_type_map": {
             "阅读榜西方奇幻": {"rank_family": "阅读榜", "rank_sub_cat": "西方奇幻"},
@@ -194,6 +196,8 @@ WEBSITES = {
             "阅读榜都市高武": {"rank_family": "阅读榜", "rank_sub_cat": "都市高武"},
             "阅读榜悬疑脑洞": {"rank_family": "阅读榜", "rank_sub_cat": "悬疑脑洞"},
             "阅读榜都市脑洞": {"rank_family": "阅读榜", "rank_sub_cat": "都市脑洞"},
+            "阅读榜玄幻脑洞": {"rank_family": "阅读榜", "rank_sub_cat": "玄幻脑洞"},
+            "阅读榜悬疑灵异": {"rank_family": "阅读榜", "rank_sub_cat": "悬疑灵异"},
             "阅读榜动漫衍生": {"rank_family": "阅读榜", "rank_sub_cat": "动漫衍生"},
             # 新书榜
             "新书榜西方奇幻": {"rank_family": "新书榜", "rank_sub_cat": "西方奇幻"},
@@ -515,4 +519,3 @@ ANALYSIS_CONFIG = {
         "qidian": 1.0,
     },
 }
-

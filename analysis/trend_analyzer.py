@@ -11,6 +11,8 @@ from analysis.metrics import (
     add_unified_columns,
     compute_weekly_tag_panel,
     compute_timewindow_rollup,
+    compute_weekly_category_panel,
+    compute_timewindow_category_rollup as compute_timewindow_rollup_category,
     compute_new_entry_ratio_compact,
     compute_cooccurrence_pairs,
     compute_cooccurrence_triples,
@@ -150,9 +152,14 @@ class TrendAnalyzer:
         df = add_heat(df, self.heat_cfg)
         df = add_unified_columns(df)
 
-        # weekly panel + rollup
+        # weekly panel + rollup (tags)
         weekly = compute_weekly_tag_panel(df, self.metric_cfg)
         roll = compute_timewindow_rollup(weekly, self.metric_cfg)
+
+        # weekly panel + rollup (categories; cross-platform comparable)
+        weekly_cat = compute_weekly_category_panel(df, self.metric_cfg)
+        roll_cat = compute_timewindow_rollup_category(weekly_cat, self.metric_cfg)
+
 
         # extra blocks
         new_entry_compact = compute_new_entry_ratio_compact(df, args.start_date, args.end_date)
@@ -202,6 +209,8 @@ class TrendAnalyzer:
             end_date=args.end_date,
             weekly=weekly,
             roll=roll,
+            weekly_cat=weekly_cat,
+            roll_cat=roll_cat,
             new_entry_compact=new_entry_compact,
             pairs2=pairs2,
             triples3=triples3,
