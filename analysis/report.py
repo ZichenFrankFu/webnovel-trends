@@ -36,14 +36,14 @@ def md_table(df: pd.DataFrame, max_rows: int = 20) -> str:
 
 def _safe_subcat(x) -> str:
     if x is None or (isinstance(x, float) and pd.isna(x)) or str(x).strip() == "":
-        return "（未分组/ALL）"
+        return "ALL"
     return str(x)
 
 
 def _norm_subcat(series: pd.Series) -> pd.Series:
     """Normalize rank_sub_cat so empty-string and NaN collapse into the same label."""
     s = series.fillna("").astype(str).map(lambda x: x.strip())
-    return s.replace({"": "（未分组/ALL）"})
+    return s.replace({"": "ALL"})
 
 def build_cross_platform_diff_by_tag(roll: pd.DataFrame) -> pd.DataFrame:
     """
@@ -130,9 +130,9 @@ def build_cross_platform_diff_by_category(roll_cat: pd.DataFrame) -> pd.DataFram
 
 def _explain_sampling() -> str:
     return (
-        "### 抽样机制说明（非常重要）\n\n"
-        "- **起点**：混合榜/全站竞争（榜单样本更接近“市场主赛道竞争结果”）。\n"
-        "- **番茄**：分类榜/子类竞争（榜单样本更接近条件分布 `P(书 | 子分类榜)`）。\n\n"
+        "### 抽样机制说明\n\n"
+        "- **起点**：混合榜/全站竞争（榜单样本更接近真实市场主赛道竞争结果）\n"
+        "- **番茄**：分类榜/子类竞争（榜单样本更接近条件分布 `P(书 | 子分类榜)`）\n\n"
         "因此：\n"
         "- 起点可以直接统计 **分类占比** 来描述“市场竞争结构”；\n"
         "- 番茄不应把不同子分类榜直接混在一起当“市场份额”，应优先做**分类榜结构**与**分类内 top tags**。\n"
@@ -215,7 +215,7 @@ def _section_images(images: dict[str, dict[str, str]] | None) -> str:
     return "\n".join(out)
 
 
-def _fanqie_rank_structure(weekly: pd.DataFrame) -> pd.DataFrame:
+def _fanqie_rank_structure(weekly: pd.DataFrame, ranklist_avg_daily: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     构造番茄“分类榜结构”表：
     每个 (rank_family, rank_sub_cat) 汇总：
@@ -233,22 +233,130 @@ def _fanqie_rank_structure(weekly: pd.DataFrame) -> pd.DataFrame:
     w["rank_sub_cat_norm"] = _norm_subcat(w["rank_sub_cat"])
 
     gb = w.groupby(["rank_family", "rank_sub_cat_norm", "week"], dropna=False).agg(
-        books=("book_count", "sum"),
+        books=("books_in_group", "max"),
         avg_heat=("avg_heat_raw", "mean"),
         entry_threshold=("entry_threshold", "mean"),
         concentration_index=("concentration_index", "mean"),
     ).reset_index()
 
     out = gb.groupby(["rank_family", "rank_sub_cat_norm"], dropna=False).agg(
-        mean_books=("books", "mean"),
+        total_books=("books", "sum"),
         avg_heat=("avg_heat", "mean"),
         entry_threshold=("entry_threshold", "mean"),
         concentration_index=("concentration_index", "mean"),
         weeks=("week", "nunique"),
     ).reset_index()
 
+    # merge avg_daily_books / days / total_books
+    if ranklist_avg_daily is not None and not ranklist_avg_daily.empty:
+        ra = ranklist_avg_daily[ranklist_avg_daily["platform"] == "fanqie"].copy()
+
+        # 用单独的 key 列，避免把 norm 覆盖成重复的 rank_sub_cat
+        ra["rank_sub_cat_key"] = _norm_subcat(ra["rank_sub_cat"])
+        ra = ra.drop(columns=["platform"], errors="ignore")
+
+        out = out.drop(columns=["total_books"], errors="ignore")
+
+        out = out.merge(
+            ra[["rank_family", "rank_sub_cat_key", "avg_daily_books", "days", "total_books"]],
+            left_on=["rank_family", "rank_sub_cat_norm"],
+            right_on=["rank_family", "rank_sub_cat_key"],
+            how="left",
+        ).drop(columns=["rank_sub_cat_key"])
+    else:
+        out["avg_daily_books"] = np.nan
+        out["days"] = np.nan
+        out["total_books"] = np.nan
+
     out = out.rename(columns={"rank_sub_cat_norm": "rank_sub_cat"})
-    out = out.sort_values(["avg_heat", "mean_books"], ascending=False)
+    out["_is_all"] = out["rank_sub_cat"].eq("ALL")
+    out = out.sort_values(
+        ["rank_family", "_is_all", "avg_daily_books", "avg_heat"],
+        ascending=[True, True, False, False]
+    ).drop(columns=["_is_all"])
+
+    return out
+
+def _qidian_rank_structure(
+    weekly: pd.DataFrame,
+    ranklist_avg_daily: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    w = weekly[weekly["platform"] == "qidian"].copy()
+    if w.empty:
+        return pd.DataFrame()
+
+    # 只对“新书榜”保留 subcat；其他榜单不区分 subcat
+    w["rank_sub_cat_norm"] = _norm_subcat(w["rank_sub_cat"])
+    w["rank_sub_cat_for_struct"] = np.where(
+        w["rank_family"].astype(str).str.contains("新书"),
+        w["rank_sub_cat_norm"],
+        ""  # 其它榜单统一一个分组（不显示 subcat）
+    )
+
+    # 从 weekly(tag 面板) 计算结构指标（注意：books_in_group 在 tag 面板里不是榜单总书数）
+    gb = w.groupby(["rank_family", "rank_sub_cat_for_struct", "week"], dropna=False).agg(
+        avg_heat=("avg_heat_raw", "mean"),
+        entry_threshold=("entry_threshold", "mean"),
+        concentration_index=("concentration_index", "mean"),
+    ).reset_index()
+
+    out = gb.groupby(["rank_family", "rank_sub_cat_for_struct"], dropna=False).agg(
+        avg_heat=("avg_heat", "mean"),
+        entry_threshold=("entry_threshold", "mean"),
+        concentration_index=("concentration_index", "mean"),
+    ).reset_index()
+
+    # 先把分组列标准化成 rank_sub_cat（后面所有 merge 都用它）
+    out = out.rename(columns={"rank_sub_cat_for_struct": "rank_sub_cat"})
+
+    # =========================
+    # merge avg_daily_books / days / total_books （来自 ranklist_avg_daily）
+    # =========================
+    if ranklist_avg_daily is not None and not ranklist_avg_daily.empty:
+        ra = ranklist_avg_daily[ranklist_avg_daily["platform"] == "qidian"].copy()
+
+        # 对齐结构口径：新书榜保留 subcat，其它榜单 subcat 统一为空字符串 ""
+        ra["rank_sub_cat_norm"] = _norm_subcat(ra["rank_sub_cat"])
+        ra["rank_sub_cat_key"] = np.where(
+            ra["rank_family"].astype(str).str.contains("新书"),
+            ra["rank_sub_cat_norm"],
+            ""
+        )
+
+        # drop 原始列，避免重复列名
+        ra = ra.drop(columns=["platform", "rank_sub_cat", "rank_sub_cat_norm"], errors="ignore")
+
+        # ✅ 关键修复：把 ra 压成唯一 key（避免 merge 1->N 复制 out 行）
+        ra = ra.groupby(["rank_family", "rank_sub_cat_key"], dropna=False).agg(
+            # ✅ total_books 已经是 unique novels 数，不能再 sum
+            total_books=("total_books", "max"),
+            days=("days", "max"),
+            avg_daily_books=("avg_daily_books", "mean"),
+        ).reset_index()
+
+        # ✅ 如果 out 里已经存在 total_books（旧口径），先删掉，避免 total_books_x/y
+        out = out.drop(columns=["total_books"], errors="ignore")
+
+        out = out.merge(
+            ra[["rank_family", "rank_sub_cat_key", "avg_daily_books", "days", "total_books"]],
+            left_on=["rank_family", "rank_sub_cat"],
+            right_on=["rank_family", "rank_sub_cat_key"],
+            how="left",
+        ).drop(columns=["rank_sub_cat_key"])
+    else:
+        out["avg_daily_books"] = np.nan
+        out["days"] = np.nan
+        out["total_books"] = np.nan
+
+    # 让“非新书榜”的 subcat 显示为 "-"
+    out["rank_sub_cat"] = out["rank_sub_cat"].astype(str)
+    out.loc[out["rank_sub_cat"].str.strip().eq(""), "rank_sub_cat"] = "-"
+
+    # 排序：优先看抓取强度，其次热度
+    out = out.sort_values(
+        ["rank_family", "avg_daily_books", "avg_heat"],
+        ascending=[True, False, False]
+    )
     return out
 
 
@@ -257,37 +365,40 @@ def _fanqie_top_tags_by_subcat(weekly: pd.DataFrame, top_groups: int = 3, top_k:
     if w.empty:
         return "（无数据）\n"
 
-    # 选最“重”的榜单组（按 avg_heat & books）
     struct = _fanqie_rank_structure(weekly)
     if struct.empty:
         return "（无数据）\n"
+
     pick = struct.head(top_groups)[["rank_family", "rank_sub_cat"]].to_dict("records")
 
-    out = []
+    # 合并所有选中的榜单
+    ww = w.copy()
+    ww["rank_sub_cat_norm"] = _norm_subcat(ww["rank_sub_cat"])
+
+    mask = False
     for g in pick:
-        rf = g["rank_family"]
-        sub = g["rank_sub_cat"]
-        # 注意：rank_sub_cat 已在结构表中归一化为“（未分组/ALL）”等；这里用同样的归一化口径筛选
-        ww = w.copy()
-        ww["rank_sub_cat_norm"] = _norm_subcat(ww["rank_sub_cat"])
-        wt = ww[(ww["rank_family"] == rf) & (ww["rank_sub_cat_norm"] == sub)].copy()
-        if wt.empty:
-            continue
+        mask |= (
+            (ww["rank_family"] == g["rank_family"]) &
+            (ww["rank_sub_cat_norm"] == g["rank_sub_cat"])
+        )
 
-        # 分类内 top tags：用 mean(tag_share)
-        tt = wt.groupby("tag_u", dropna=False).agg(
-            mean_share=("tag_share", "mean"),
-            avg_heat=("avg_heat_raw", "mean"),
-            mean_rank=("avg_rank", "mean"),
-            weeks=("week", "nunique"),
-        ).reset_index().dropna(subset=["tag_u"])
+    wt = ww[mask].copy()
+    if wt.empty:
+        return "（无数据）\n"
 
-        tt = tt.sort_values("mean_share", ascending=False).head(top_k)
+    tt = wt.groupby("tag_u", dropna=False).agg(
+        mean_share=("tag_share", "mean"),
+        avg_heat=("avg_heat_raw", "mean"),
+        mean_rank=("avg_rank", "mean"),
+        days=("week", "nunique"),
+    ).reset_index().dropna(subset=["tag_u"])
 
-        out.append(f"#### {rf}·{sub} - Top tags\n")
-        out.append(md_table(tt[["tag_u", "mean_share", "avg_heat", "mean_rank", "weeks"]], max_rows=top_k))
-        out.append("")
-    return "\n".join(out) if out else "（无数据）\n"
+    tt = tt.sort_values("mean_share", ascending=False).head(top_k)
+
+    out = []
+    out.append(f"#### Top tags（合并最热 {top_groups} 个分类榜）\n")
+    out.append(md_table(tt[["tag_u", "mean_share", "avg_heat", "mean_rank", "days"]], max_rows=top_k))
+    return "\n".join(out)
 
 
 def build_final_report(
@@ -303,6 +414,9 @@ def build_final_report(
     triples3: pd.DataFrame | None = None,
     images: dict[str, dict[str, str]] | None = None,   # images[platform][key] = relative_path
     cfg: ReportConfig = ReportConfig(),
+    coverage: pd.DataFrame | None = None,
+    ranklist_avg_daily: pd.DataFrame | None = None,
+
 ) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -313,57 +427,52 @@ def build_final_report(
 
     # Quick stats
     md.append("## 数据覆盖\n")
-    if roll is not None and not roll.empty:
-        cov = roll.groupby("platform")["weeks"].max().reset_index().rename(columns={"weeks": "max_weeks_in_window"})
-        md.append(md_table(cov, max_rows=10))
+    if coverage is not None and not coverage.empty:
+        md.append(md_table(coverage, max_rows=10))
     else:
         md.append("（无数据）\n")
 
-    # Qidian/Fanqie tag view
+    # Qidian
     md.append(_section_platform_topk(roll, "qidian", cfg.top_k))
-    md.append(_section_platform_topk(roll, "fanqie", cfg.top_k))
+    md.append("## 起点抓取数据总览 \n")
+    struct_q = _qidian_rank_structure(weekly, ranklist_avg_daily)
+    md.append(md_table(struct_q, max_rows=30))
 
-    # Fanqie structure
-    md.append("## 番茄：分类榜结构（按 rank_family + rank_sub_cat）\n")
-    struct = _fanqie_rank_structure(weekly)
+    # Fanqie
+    md.append(_section_platform_topk(roll, "fanqie", cfg.top_k))
+    md.append("## 番茄抓取数据总览\n")
+    struct = _fanqie_rank_structure(weekly, ranklist_avg_daily)
     md.append(md_table(struct, max_rows=30))
     md.append(_explain_concentration())
 
-    md.append("## 番茄：分类内 Top tags（按最热 Top3 分类榜）\n")
-    md.append(_fanqie_top_tags_by_subcat(weekly, top_groups=3, top_k=min(cfg.top_k, 10)))
-
-    # Cross-platform diff: category (preferred)
-    if roll_cat is not None and not roll_cat.empty:
-        md.append("## 跨平台差异（分类口径：cat_u，可比）\n")
-        md.append(_explain_cross_platform_diff())
-        diffc = build_cross_platform_diff_by_category(roll_cat)
-        show = diffc.sort_values("share_diff", ascending=False)[
-            ["cat_u", "presence", "share_qidian", "share_fanqie", "share_diff", "heat_diff", "rank_diff"]
-        ]
-        md.append(md_table(show, max_rows=30))
-    else:
-        md.append("## 跨平台差异（分类口径：cat_u，可比）\n\n（无分类口径数据）\n")
-
-    # Cross-platform diff: tag (supplementary)
-    md.append("## 跨平台差异（tag_u，补充参考）\n")
-    difft = build_cross_platform_diff_by_tag(roll)
-    show2 = difft.sort_values("share_diff", ascending=False)[
-        ["tag_u", "presence", "share_qidian", "share_fanqie", "share_diff", "heat_diff", "rank_diff"]
-    ]
-    md.append(md_table(show2, max_rows=30))
-
-    # New entry compact
-    md.append("## 新书驱动（created_date 落在窗口内）\n")
-    if new_entry_compact is None or new_entry_compact.empty:
-        md.append("（无数据）\n")
-    else:
-        md.append(md_table(new_entry_compact, max_rows=30))
+    md.append("## 番茄：分类内 Top tags（按最热 Top5 分类榜）\n")
+    md.append(_fanqie_top_tags_by_subcat(weekly, top_groups=5, top_k=min(cfg.top_k, 10)))
 
     # Co-occurrence
     md.append("## Tag 共现（pairs）\n")
     md.append(md_table(pairs2, max_rows=30))
     md.append("## Tag 共现（triples）\n")
     md.append(md_table(triples3, max_rows=30))
+
+
+    # Cross-platform diff: category (preferred)
+    if roll_cat is not None and not roll_cat.empty:
+        md.append("## 跨平台题材差异\n")
+        md.append(_explain_cross_platform_diff())
+        diffc = build_cross_platform_diff_by_category(roll_cat)
+        diffc = diffc[diffc["presence"] == "both"]
+        show = diffc.sort_values("share_diff", ascending=False)[
+            ["cat_u", "presence", "share_qidian", "share_fanqie", "share_diff", "heat_diff", "rank_diff"]
+        ]
+        md.append(md_table(show, max_rows=30))
+
+    # New entry compact
+    md.append("## 新书热点\n")
+    if new_entry_compact is None or new_entry_compact.empty:
+        md.append("（无数据）\n")
+    else:
+        md.append(md_table(new_entry_compact, max_rows=30))
+
 
     # Images
     img_sec = _section_images(images)

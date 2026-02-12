@@ -148,9 +148,66 @@ class TrendAnalyzer:
             rank_sub_cat=args.rank_sub_cat,
         )
 
+        coverage = (
+            df.groupby("platform")["snapshot_date"]
+            .agg(min_date="min", max_date="max", n_days="nunique")
+            .reset_index()
+        )
+
         # heat + unify tag/week
         df = add_heat(df, self.heat_cfg)
         df = add_unified_columns(df)
+
+        d0 = df.dropna(subset=["platform", "rank_family", "snapshot_date", "novel_uid"]).copy()
+
+        # ----------------------------
+        # Rank-list coverage stats (dedup by novel_uid)
+        # ----------------------------
+        d0 = df.dropna(subset=["platform", "rank_family", "snapshot_date", "novel_uid"]).copy()
+        d0["rank_sub_cat"] = d0["rank_sub_cat"].fillna("").astype(str).str.strip()
+
+        # (1) 平台维度：窗口期去重书籍数（可选）
+        unique_books_platform = (
+            d0.groupby("platform", dropna=False)["novel_uid"].nunique(dropna=True)
+            .reset_index()
+            .rename(columns={"novel_uid": "unique_books"})
+        )
+
+        # (2) 榜单-日：每天每个榜单抓取了多少本（去重 novel_uid）
+        daily_rank_books = (
+            d0.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "snapshot_date", "novel_uid"])
+            .groupby(["platform", "rank_family", "rank_sub_cat", "snapshot_date"], dropna=False)
+            .agg(daily_books=("novel_uid", "nunique"))
+            .reset_index()
+        )
+
+        # (3) 榜单维度：平均每天抓取量 + 抓取天数
+        ranklist_avg_daily = (
+            daily_rank_books
+            .groupby(["platform", "rank_family", "rank_sub_cat"], dropna=False)
+            .agg(
+                avg_daily_books=("daily_books", "mean"),
+                days=("snapshot_date", "nunique"),
+            )
+            .reset_index()
+        )
+
+        # (4) ✅ 关键口径：窗口期内该榜单出现过的 unique novels 数
+        ranklist_total_books = (
+            d0.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "novel_uid"])
+            .groupby(["platform", "rank_family", "rank_sub_cat"], dropna=False)
+            .agg(total_books=("novel_uid", "nunique"))
+            .reset_index()
+        )
+
+        ranklist_avg_daily = ranklist_avg_daily.merge(
+            ranklist_total_books,
+            on=["platform", "rank_family", "rank_sub_cat"],
+            how="left",
+        )
+
+        # 统一 subcat 显示（None/NaN -> ""）
+        ranklist_avg_daily["rank_sub_cat"] = ranklist_avg_daily["rank_sub_cat"].fillna("").astype(str).str.strip()
 
         # weekly panel + rollup (tags)
         weekly = compute_weekly_tag_panel(df, self.metric_cfg)
@@ -216,6 +273,8 @@ class TrendAnalyzer:
             triples3=triples3,
             images=images,
             cfg=ReportConfig(top_k=args.top_k),
+            coverage=coverage,
+            ranklist_avg_daily=ranklist_avg_daily,
         )
 
         # write md

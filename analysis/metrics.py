@@ -7,6 +7,19 @@ from dataclasses import dataclass
 from itertools import combinations
 
 
+# ==========================
+# Category merge rules
+# ==========================
+CATEGORY_RULES = {
+    "都市": ["都市高武", "都市脑洞"],
+    "科幻": ["科幻末世"],
+    "奇幻": ["西方奇幻"],
+    "悬疑": ["悬疑脑洞"],
+    "玄幻": ["玄幻脑洞"],
+}
+
+
+
 @dataclass(frozen=True)
 class MetricConfig:
     top_n_for_top_appearance: int = 10   # top_appearance_ratio 的 TopN
@@ -17,8 +30,9 @@ class MetricConfig:
 
 
 def week_start_monday(d: pd.Series) -> pd.Series:
-    dt = pd.to_datetime(d)
-    return dt.dt.to_period("W-MON").dt.start_time.dt.date
+    # 不再按自然周分桶
+    # 直接使用 snapshot_date 本身（按日聚合）
+    return pd.to_datetime(d).dt.date
 
 
 def unify_tag(row) -> str:
@@ -29,8 +43,21 @@ def unify_tag(row) -> str:
 
 
 def unify_category(row) -> str:
-    # 两个平台统一用 novels.main_category 作为可比“分类口径”
-    return row["main_category"] if pd.notna(row["main_category"]) else pd.NA
+    cat = row["main_category"]
+    if pd.isna(cat):
+        return pd.NA
+
+    cat = str(cat).strip()
+
+    # 命中“子类”或“父类”都统一返回父类（只做合并，不保留层级）
+    for parent, subs in CATEGORY_RULES.items():
+        if parent in cat:
+            return parent
+        for sub in subs:
+            if sub in cat:
+                return parent
+
+    return cat
 
 
 def linear_slope(y: np.ndarray) -> float:
@@ -97,21 +124,35 @@ def compute_weekly_tag_panel(df: pd.DataFrame, cfg: MetricConfig) -> pd.DataFram
     weekly = weekly.merge(head, on=keys, how="left")
 
     key2 = ["platform", "rank_family", "rank_sub_cat", "week"]
-    total_books = weekly.groupby(key2)["book_count"].transform("sum").replace(0, np.nan)
-    weekly["tag_share"] = weekly["book_count"] / total_books
 
+    # ✅ 口径修复：share 的分母必须是“该周该榜单 unique novels 数”，不能用 sum(book_count)
+    # 否则同一本书在多个 tag 下会被重复计入分母，导致 share 失真、Top tags 表出现重复/异常。
+    d2 = (
+        d.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "week", "novel_uid"])
+        .dropna(subset=["rank", "heat_raw"])
+    )
+    books_grp = (
+        d2.groupby(key2, dropna=False)["novel_uid"]
+        .nunique(dropna=True)
+        .reset_index(name="books_in_group")
+    )
+    weekly = weekly.merge(books_grp, on=key2, how="left")
+
+    denom = weekly["books_in_group"].replace(0, np.nan)
+    weekly["tag_share"] = weekly["book_count"] / denom
+
+    # concentration: HHI over tag shares within the same (platform, rank_family, subcat, week)
     conc = (
-        weekly.groupby(key2)["tag_share"]
+        weekly.groupby(key2, dropna=False)["tag_share"]
         .apply(lambda s: float((s.fillna(0) ** 2).sum()))
         .reset_index(name="concentration_index")
     )
     weekly = weekly.merge(conc, on=key2, how="left")
 
+
     entry_n = cfg.entry_top_n
-    d2 = (
-        d.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "week", "novel_uid"])
-        .dropna(subset=["rank", "heat_raw"])
-    )
+
+
 
     def entry_threshold(sub: pd.DataFrame) -> float:
         sub = sub.sort_values("rank").head(entry_n)
@@ -240,22 +281,32 @@ def compute_weekly_category_panel(df: pd.DataFrame, cfg: MetricConfig) -> pd.Dat
 
     weekly["efficiency"] = weekly["total_heat_raw"] / weekly["book_count"].replace(0, np.nan)
 
+
     key2 = ["platform", "rank_family", "rank_sub_cat", "week"]
-    total_books = weekly.groupby(key2)["book_count"].transform("sum").replace(0, np.nan)
-    weekly["cat_share"] = weekly["book_count"] / total_books
+
+    # ✅ 口径修复：cat_share 的分母用该周该榜单 unique novels 数（去重 novel_uid）
+    d2 = (
+        d.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "week", "novel_uid"])
+        .dropna(subset=["rank", "heat_raw"])
+    )
+    books_grp = (
+        d2.groupby(key2, dropna=False)["novel_uid"]
+        .nunique(dropna=True)
+        .reset_index(name="books_in_group")
+    )
+    weekly = weekly.merge(books_grp, on=key2, how="left")
+
+    denom = weekly["books_in_group"].replace(0, np.nan)
+    weekly["cat_share"] = weekly["book_count"] / denom
 
     conc = (
-        weekly.groupby(key2)["cat_share"]
+        weekly.groupby(key2, dropna=False)["cat_share"]
         .apply(lambda s: float((s.fillna(0) ** 2).sum()))
         .reset_index(name="concentration_index")
     )
     weekly = weekly.merge(conc, on=key2, how="left")
 
     entry_n = cfg.entry_top_n
-    d2 = (
-        d.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "week", "novel_uid"])
-        .dropna(subset=["rank", "heat_raw"])
-    )
 
     def entry_threshold(sub: pd.DataFrame) -> float:
         sub = sub.sort_values("rank").head(entry_n)

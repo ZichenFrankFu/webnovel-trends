@@ -5,28 +5,24 @@
 
 一键启动
 ```bash
-python run_analysis.py --db ../outputs/data/novels.db --start_date 2026-02-01 --end_date 2026-02-12 --platform both --top_k 10
+python run_analysis.py --db ../outputs/data/novels.db --platform both --top_k 10 --lookback all
 ```
 
 ---
 # 一、时间窗口说明
 所有指标均基于可调时间窗口计算。
 推荐参数：
-
 ```
---start_date YYYY-MM-DD
---end_date YYYY-MM-DD
---window daily | weekly | monthly
---top_k 数量
 --platform qidian | fanqie | both
---rank_family 可选
+--lookback week | month | quarter | year | all
+--top_k 数量
 ```
 默认建议使用 **weekly（按周统计）**，以减少日波动影响。
 ---
 
 
-# 0. 抽样机制差异（必须读）
-- **起点中文网**：混合榜（全站竞争），因此 `main_category` 的占比更接近“市场竞争结构”。
+# 0. 抽样机制差异
+- **起点中文网**：混合榜（全站竞争），因此 `main_category` 的占比更接近真实的市场结构。
 - **番茄小说**：分类榜（每个 `rank_sub_cat` 单独竞争），跨 `rank_sub_cat` 聚合后的占比是“抽样设计结果”，不能直接当作市场份额。
 
 本项目为此做了两套口径：
