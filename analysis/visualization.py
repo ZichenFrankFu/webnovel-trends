@@ -72,6 +72,7 @@ def save_line_top_tags(
     title: str,
     out_path: str,
     topk: int = 5,
+    preselected_tags: list[str] | None = None,
 ) -> str:
     """
     修复点：
@@ -84,14 +85,23 @@ def save_line_top_tags(
     # 先聚合到 (x, tag) 粒度，避免重复点
     d = d.groupby([x_col, tag_col], dropna=False)[y_col].mean().reset_index()
 
-    top_tags = (
-        d.groupby(tag_col)[y_col].mean()
-        .sort_values(ascending=False)
-        .head(topk)
-        .index
-        .tolist()
-    )
-    d = d[d[tag_col].isin(top_tags)].sort_values(x_col)
+    if preselected_tags is not None:
+        # 不做二次筛选：按调用方给定的顺序绘制（用于“强制画够 N 条线”的场景）
+        wanted = [str(t) for t in preselected_tags if t is not None]
+        # 只保留当前数据里存在的 tag，并保持顺序
+        present = set(d[tag_col].astype(str).unique().tolist())
+        top_tags = [t for t in wanted if t in present][:topk]
+    else:
+        # 默认行为：按 y 的均值选 TopK
+        top_tags = (
+            d.groupby(tag_col)[y_col].mean()
+            .sort_values(ascending=False)
+            .head(topk)
+            .index
+            .tolist()
+        )
+
+    d = d[d[tag_col].astype(str).isin([str(t) for t in top_tags])].sort_values(x_col)
 
     plt.figure()
     for tag, sub in d.groupby(tag_col):

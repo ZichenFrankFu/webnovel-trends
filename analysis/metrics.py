@@ -19,7 +19,6 @@ CATEGORY_RULES = {
 }
 
 
-
 @dataclass(frozen=True)
 class MetricConfig:
     top_n_for_top_appearance: int = 10   # top_appearance_ratio 的 TopN
@@ -35,11 +34,36 @@ def week_start_monday(d: pd.Series) -> pd.Series:
     return pd.to_datetime(d).dt.date
 
 
-def unify_tag(row) -> str:
-    # qidian: main_category 当作 tag；fanqie: tag_name
-    if row["platform"] == "qidian":
-        return row["main_category"] if pd.notna(row["main_category"]) else pd.NA
-    return row["tag_name"] if pd.notna(row["tag_name"]) else pd.NA
+def _derive_sub_cat(main_category: object) -> object:
+    """Derive qidian sub_cat from NOVELS.main_category.
+
+    Examples:
+      - '仙侠·修真文明' -> '修真文明'
+      - '科幻末世' -> '科幻末世'
+    """
+    if pd.isna(main_category):
+        return pd.NA
+    s = str(main_category).strip()
+    if not s:
+        return pd.NA
+    if "·" in s:
+        parts = [p.strip() for p in s.split("·") if p.strip()]
+        return parts[-1] if parts else pd.NA
+    return s
+
+
+def unify_tag(row) -> object:
+    """Unified tag (tag_u) per Analysis.md.
+
+    | platform | tag_u    |
+    |----------|----------|
+    | qidian   | sub_cat  |
+    | fanqie   | tag_name |
+    """
+    if row.get("platform") == "qidian":
+        return _derive_sub_cat(row.get("main_category"))
+    tn = row.get("tag_name")
+    return str(tn).strip() if pd.notna(tn) and str(tn).strip() else pd.NA
 
 
 def unify_category(row) -> str:
@@ -98,77 +122,46 @@ def compute_weekly_tag_panel(df: pd.DataFrame, cfg: MetricConfig) -> pd.DataFram
     g = d.groupby(keys, dropna=False)
 
     weekly = g.agg(
-        book_count=("novel_uid", lambda x: x.nunique(dropna=True)),
+        book_count=("novel_uid", lambda x: x.nunique()),
         avg_rank=("rank", "mean"),
-        median_rank=("rank", "median"),
         avg_heat_raw=("heat_raw", "mean"),
         median_heat_raw=("heat_raw", "median"),
-        total_heat_raw=("heat_raw", "sum"),
-        avg_heat_mix=("heat_mix", "mean"),
-        total_heat_mix=("heat_mix", "sum"),
-        heat_volatility=("heat_raw", "std"),
+        entry_threshold=("heat_raw", "min"),
     ).reset_index()
 
-    weekly["efficiency"] = weekly["total_heat_raw"] / weekly["book_count"].replace(0, np.nan)
-
-    def head_ratio(sub: pd.DataFrame) -> float:
-        x = sub.drop_duplicates("novel_uid")[["novel_uid", "heat_raw"]].dropna()
-        if x.empty:
-            return np.nan
-        tot = x["heat_raw"].sum()
-        if tot <= 0:
-            return np.nan
-        return float(x["heat_raw"].nlargest(3).sum() / tot)
-
-    head = g.apply(head_ratio).reset_index(name="head_ratio")
-    weekly = weekly.merge(head, on=keys, how="left")
-
+    # books_in_group: 每周该榜单 unique novels 数（分母）
     key2 = ["platform", "rank_family", "rank_sub_cat", "week"]
-
-    # ✅ 口径修复：share 的分母必须是“该周该榜单 unique novels 数”，不能用 sum(book_count)
-    # 否则同一本书在多个 tag 下会被重复计入分母，导致 share 失真、Top tags 表出现重复/异常。
-    d2 = (
-        d.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "week", "novel_uid"])
-        .dropna(subset=["rank", "heat_raw"])
-    )
-    books_grp = (
-        d2.groupby(key2, dropna=False)["novel_uid"]
-        .nunique(dropna=True)
+    books_in_group = (
+        d.drop_duplicates(key2 + ["novel_uid"])
+        .groupby(key2, dropna=False)["novel_uid"]
+        .nunique()
         .reset_index(name="books_in_group")
     )
-    weekly = weekly.merge(books_grp, on=key2, how="left")
+    weekly = weekly.merge(books_in_group, on=key2, how="left")
 
-    denom = weekly["books_in_group"].replace(0, np.nan)
-    weekly["tag_share"] = weekly["book_count"] / denom
+    weekly["tag_share"] = weekly["book_count"] / weekly["books_in_group"].replace(0, np.nan)
 
-    # concentration: HHI over tag shares within the same (platform, rank_family, subcat, week)
-    conc = (
-        weekly.groupby(key2, dropna=False)["tag_share"]
-        .apply(lambda s: float((s.fillna(0) ** 2).sum()))
-        .reset_index(name="concentration_index")
+    # efficiency: heat per rank (rough)
+    weekly["efficiency"] = weekly["avg_heat_raw"] / weekly["avg_rank"].replace(0, np.nan)
+
+    # head ratio: fraction of top appearances
+    top_n = cfg.top_n_for_top_appearance
+    top_app = (
+        d[d["rank"] <= top_n]
+        .drop_duplicates(key2 + ["novel_uid", "tag_u"])
+        .groupby(keys, dropna=False)["novel_uid"]
+        .nunique()
+        .reset_index(name="top_app_count")
     )
+    weekly = weekly.merge(top_app, on=keys, how="left")
+    weekly["top_app_count"] = weekly["top_app_count"].fillna(0)
+    weekly["head_ratio"] = weekly["top_app_count"] / weekly["book_count"].replace(0, np.nan)
+
+    # concentration_index (HHI-like) for each list-week using tag_share
+    conc = weekly.groupby(key2, dropna=False).apply(
+        lambda sub: float(np.nansum((sub["tag_share"].to_numpy(dtype=float)) ** 2))
+    ).reset_index(name="concentration_index")
     weekly = weekly.merge(conc, on=key2, how="left")
-
-
-    entry_n = cfg.entry_top_n
-
-
-
-    def entry_threshold(sub: pd.DataFrame) -> float:
-        sub = sub.sort_values("rank").head(entry_n)
-        return float(sub["heat_raw"].min()) if not sub.empty else np.nan
-
-    th = d2.groupby(key2, dropna=False).apply(entry_threshold).reset_index(name="entry_threshold")
-    weekly = weekly.merge(th, on=key2, how="left")
-
-    weekly = weekly.sort_values(keys)
-    weekly["share_growth"] = weekly.groupby(
-        ["platform", "rank_family", "rank_sub_cat", "tag_u"]
-    )["tag_share"].pct_change()
-
-    weekly["heat_growth"] = weekly.groupby(
-        ["platform", "rank_family", "rank_sub_cat", "tag_u"]
-    )["avg_heat_raw"].pct_change()
 
     return weekly
 
@@ -182,7 +175,9 @@ def compute_timewindow_rollup(weekly: pd.DataFrame, cfg: MetricConfig) -> pd.Dat
     d = d.sort_values(keys + ["week"])
 
     roll = d.groupby(keys, dropna=False).agg(
-        weeks=("week", "nunique"),
+        days_seen=("week", "nunique"),
+        min_date=("week", "min"),
+        max_date=("week", "max"),
         mean_rank=("avg_rank", "mean"),
         rank_std=("avg_rank", "std"),
         mean_share=("tag_share", "mean"),
@@ -193,6 +188,11 @@ def compute_timewindow_rollup(weekly: pd.DataFrame, cfg: MetricConfig) -> pd.Dat
         mean_head_ratio=("head_ratio", "mean"),
         mean_entry_threshold=("entry_threshold", "mean"),
     ).reset_index()
+
+    roll["days_span"] = (
+        (pd.to_datetime(roll["max_date"]) - pd.to_datetime(roll["min_date"]))
+        .dt.days + 1
+    )
 
     def slope_of(col: str):
         def _f(sub: pd.DataFrame) -> float:
@@ -205,62 +205,33 @@ def compute_timewindow_rollup(weekly: pd.DataFrame, cfg: MetricConfig) -> pd.Dat
         on=keys, how="left"
     )
     roll = roll.merge(
-        d.groupby(keys, dropna=False).apply(slope_of("tag_share")).reset_index(name="share_slope"),
-        on=keys, how="left"
-    )
-    roll = roll.merge(
         d.groupby(keys, dropna=False).apply(slope_of("avg_heat_raw")).reset_index(name="heat_slope"),
         on=keys, how="left"
     )
-
-    N = cfg.top_n_for_top_appearance
-    top_ratio = (
-        d.assign(is_top=lambda x: x["avg_rank"] <= N)
-        .groupby(keys)["is_top"].mean()
-        .reset_index(name="top_appearance_ratio")
+    roll = roll.merge(
+        d.groupby(keys, dropna=False).apply(slope_of("tag_share")).reset_index(name="share_slope"),
+        on=keys, how="left"
     )
-    roll = roll.merge(top_ratio, on=keys, how="left")
 
-    # lifecycle stage（避免 UNKNOWN）
-    def stage_row(row) -> tuple[str, str]:
-        weeks = row["weeks"]
-        ms = row["mean_share"]
-        mr = row["mean_rank"]
-        ss = row["share_slope"]
-        hs = row["heat_slope"]
+    # safe/chance heuristic
+    def stage_row(row):
+        days_seen = row["days_seen"]
+        if pd.isna(days_seen) or days_seen < 2:
+            return "unknown"
+        if row["mean_share"] >= 0.08 and row["avg_heat"] >= row["median_heat"]:
+            return "safe"
+        if row["share_slope"] > 0 and row["heat_slope"] > 0:
+            return "chance"
+        return "stable"
 
-        if pd.isna(weeks) or weeks < 2:
-            if (pd.notna(ms) and ms >= 0.15) or (pd.notna(mr) and mr <= 10):
-                return "单周快照-强势", "level"
-            if pd.notna(ms) and ms >= 0.05:
-                return "单周快照-中等", "level"
-            return "单周快照-长尾", "level"
-
-        if pd.isna(ss) or pd.isna(hs):
-            if pd.notna(ms) and ms >= 0.10:
-                return "成熟(缺趋势)", "level"
-            return "过渡(缺趋势)", "level"
-
-        if ss > 0 and hs > 0:
-            return "成长", "slope"
-        if ss < 0 and hs < 0:
-            return "衰退", "slope"
-        if pd.notna(ms) and ms >= 0.10 and abs(ss) < 1e-3 and abs(hs) < 1e-3:
-            return "成熟", "slope"
-        return "过渡", "slope"
-
-    roll[["life_stage", "stage_basis"]] = roll.apply(lambda r: pd.Series(stage_row(r)), axis=1)
+    roll["stage"] = roll.apply(stage_row, axis=1)
     return roll
 
 
 # -----------------------------
-# Weekly panel: CATEGORY 口径（你缺的就是这个）
+# Weekly panel: CATEGORY 口径
 # -----------------------------
 def compute_weekly_category_panel(df: pd.DataFrame, cfg: MetricConfig) -> pd.DataFrame:
-    """
-    输出：按 (platform, rank_family, rank_sub_cat, week, cat_u) 的周面板指标
-    用于跨平台可比的“分类口径”
-    """
     d = df.copy()
     d = d.dropna(subset=["rank", "week", "platform", "rank_family", "cat_u"])
 
@@ -268,62 +239,27 @@ def compute_weekly_category_panel(df: pd.DataFrame, cfg: MetricConfig) -> pd.Dat
     g = d.groupby(keys, dropna=False)
 
     weekly = g.agg(
-        book_count=("novel_uid", lambda x: x.nunique(dropna=True)),
+        book_count=("novel_uid", lambda x: x.nunique()),
         avg_rank=("rank", "mean"),
-        median_rank=("rank", "median"),
         avg_heat_raw=("heat_raw", "mean"),
-        median_heat_raw=("heat_raw", "median"),
-        total_heat_raw=("heat_raw", "sum"),
-        avg_heat_mix=("heat_mix", "mean"),
-        total_heat_mix=("heat_mix", "sum"),
-        heat_volatility=("heat_raw", "std"),
+        entry_threshold=("heat_raw", "min"),
     ).reset_index()
 
-    weekly["efficiency"] = weekly["total_heat_raw"] / weekly["book_count"].replace(0, np.nan)
-
-
     key2 = ["platform", "rank_family", "rank_sub_cat", "week"]
-
-    # ✅ 口径修复：cat_share 的分母用该周该榜单 unique novels 数（去重 novel_uid）
-    d2 = (
-        d.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "week", "novel_uid"])
-        .dropna(subset=["rank", "heat_raw"])
-    )
-    books_grp = (
-        d2.groupby(key2, dropna=False)["novel_uid"]
-        .nunique(dropna=True)
+    books_in_group = (
+        d.drop_duplicates(key2 + ["novel_uid"])
+        .groupby(key2, dropna=False)["novel_uid"]
+        .nunique()
         .reset_index(name="books_in_group")
     )
-    weekly = weekly.merge(books_grp, on=key2, how="left")
+    weekly = weekly.merge(books_in_group, on=key2, how="left")
 
-    denom = weekly["books_in_group"].replace(0, np.nan)
-    weekly["cat_share"] = weekly["book_count"] / denom
+    weekly["cat_share"] = weekly["book_count"] / weekly["books_in_group"].replace(0, np.nan)
 
-    conc = (
-        weekly.groupby(key2, dropna=False)["cat_share"]
-        .apply(lambda s: float((s.fillna(0) ** 2).sum()))
-        .reset_index(name="concentration_index")
-    )
+    conc = weekly.groupby(key2, dropna=False).apply(
+        lambda sub: float(np.nansum((sub["cat_share"].to_numpy(dtype=float)) ** 2))
+    ).reset_index(name="concentration_index")
     weekly = weekly.merge(conc, on=key2, how="left")
-
-    entry_n = cfg.entry_top_n
-
-    def entry_threshold(sub: pd.DataFrame) -> float:
-        sub = sub.sort_values("rank").head(entry_n)
-        return float(sub["heat_raw"].min()) if not sub.empty else np.nan
-
-    th = d2.groupby(key2, dropna=False).apply(entry_threshold).reset_index(name="entry_threshold")
-    weekly = weekly.merge(th, on=key2, how="left")
-
-    weekly = weekly.sort_values(keys)
-    weekly["share_growth"] = weekly.groupby(
-        ["platform", "rank_family", "rank_sub_cat", "cat_u"]
-    )["cat_share"].pct_change()
-
-    weekly["heat_growth"] = weekly.groupby(
-        ["platform", "rank_family", "rank_sub_cat", "cat_u"]
-    )["avg_heat_raw"].pct_change()
-
     return weekly
 
 
@@ -336,15 +272,20 @@ def compute_timewindow_category_rollup(weekly_cat: pd.DataFrame, cfg: MetricConf
     d = d.sort_values(keys + ["week"])
 
     roll = d.groupby(keys, dropna=False).agg(
-        weeks=("week", "nunique"),
+        days_seen=("week", "nunique"),
+        min_date=("week","min"),
+        max_date=("week","max"),
         mean_rank=("avg_rank", "mean"),
-        rank_std=("avg_rank", "std"),
         mean_share=("cat_share", "mean"),
         avg_heat=("avg_heat_raw", "mean"),
-        heat_volatility=("avg_heat_raw", "std"),
-        mean_efficiency=("efficiency", "mean"),
         mean_entry_threshold=("entry_threshold", "mean"),
+        concentration_index=("concentration_index", "mean"),
     ).reset_index()
+
+    roll["days_span"] = (
+        (pd.to_datetime(roll["max_date"]) - pd.to_datetime(roll["min_date"]))
+        .dt.days + 1
+    )
 
     def slope_of(col: str):
         def _f(sub: pd.DataFrame) -> float:
@@ -357,19 +298,16 @@ def compute_timewindow_category_rollup(weekly_cat: pd.DataFrame, cfg: MetricConf
         on=keys, how="left"
     )
     roll = roll.merge(
-        d.groupby(keys, dropna=False).apply(slope_of("cat_share")).reset_index(name="share_slope"),
+        d.groupby(keys, dropna=False).apply(slope_of("avg_heat_raw")).reset_index(name="heat_slope"),
         on=keys, how="left"
     )
     roll = roll.merge(
-        d.groupby(keys, dropna=False).apply(slope_of("avg_heat_raw")).reset_index(name="heat_slope"),
+        d.groupby(keys, dropna=False).apply(slope_of("cat_share")).reset_index(name="share_slope"),
         on=keys, how="left"
     )
     return roll
 
 
-# -----------------------------
-# Other blocks (co-occurrence / new entry)
-# -----------------------------
 def compute_new_entry_ratio_compact(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
     """
     新书驱动（精简版）：
@@ -385,7 +323,16 @@ def compute_new_entry_ratio_compact(df: pd.DataFrame, start_date: str, end_date:
 
     d1 = d.drop_duplicates(["platform", "tag_u", "novel_uid"]).copy()
     d1 = d1.dropna(subset=["tag_u"])
-    d1["is_new"] = d1["created_date"].apply(lambda x: (pd.notna(x) and s <= x <= e))
+
+    def _is_new(row) -> bool:
+        # fanqie：新书榜天然新入榜（不依赖 created_date）
+        if row.get("platform") == "fanqie":
+            rf = str(row.get("rank_family") or "")
+            return "新书" in rf
+        cd = row.get("created_date")
+        return (pd.notna(cd) and s <= cd <= e)
+
+    d1["is_new"] = d1.apply(_is_new, axis=1)
 
     out = d1.groupby(["platform", "tag_u"]).agg(
         total_books=("novel_uid", "count"),
@@ -394,6 +341,112 @@ def compute_new_entry_ratio_compact(df: pd.DataFrame, start_date: str, end_date:
 
     out["new_entry_ratio"] = out["new_books"] / out["total_books"].replace(0, np.nan)
     out = out.sort_values("new_entry_ratio", ascending=False)
+    return out
+
+
+def compute_opening_opportunities(
+    df: pd.DataFrame,
+    start_date: str,
+    end_date: str,
+    *,
+    top_n: int = 80,
+    min_total_books: int = 5,
+) -> pd.DataFrame:
+    """机会榜：platform + cat_u + tag_u。
+
+    目标：给“现在增长最快、适合开书”的题材组合提供可排序表。
+
+    - share：在同一平台同一天，(cat_u, tag_u) 覆盖的 unique novels / 平台当天 unique novels
+    - share_delta：窗口末日 - 首日
+    - heat_delta：窗口末日 - 首日（avg_heat_raw）
+    - new_entry_ratio：qidian=created_date in window；fanqie=新书榜天然新入榜
+    """
+    d = df.copy()
+    d["snapshot_date"] = pd.to_datetime(d["snapshot_date"], errors="coerce").dt.date
+    s = pd.to_datetime(start_date).date()
+    e = pd.to_datetime(end_date).date()
+    d = d[(d["snapshot_date"] >= s) & (d["snapshot_date"] <= e)].copy()
+    d = d.dropna(subset=["platform", "snapshot_date", "novel_uid", "cat_u", "tag_u"])
+    if d.empty:
+        return pd.DataFrame()
+
+    # 平台日分母：unique novels
+    denom = (
+        d.drop_duplicates(["platform", "snapshot_date", "novel_uid"])
+        .groupby(["platform", "snapshot_date"], dropna=False)["novel_uid"]
+        .nunique(dropna=True)
+        .reset_index(name="platform_books")
+    )
+
+    # 组内日：unique novels + avg heat
+    g = (
+        d.drop_duplicates(["platform", "snapshot_date", "cat_u", "tag_u", "novel_uid"])
+        .groupby(["platform", "snapshot_date", "cat_u", "tag_u"], dropna=False)
+        .agg(
+            books=("novel_uid", "nunique"),
+            avg_heat=("heat_raw", "mean"),
+        )
+        .reset_index()
+        .merge(denom, on=["platform", "snapshot_date"], how="left")
+    )
+    g["share"] = g["books"] / g["platform_books"].replace(0, np.nan)
+
+    # 首末日（按该组实际出现的日期）
+    span = g.groupby(["platform", "cat_u", "tag_u"], dropna=False)["snapshot_date"].agg(
+        min_date="min", max_date="max"
+    ).reset_index()
+    span["days_span"] = (pd.to_datetime(span["max_date"]) - pd.to_datetime(span["min_date"])).dt.days + 1
+
+    gf = g.merge(span, on=["platform", "cat_u", "tag_u"], how="inner")
+
+    start_rows = gf[gf["snapshot_date"] == gf["min_date"]][
+        ["platform", "cat_u", "tag_u", "share", "avg_heat"]
+    ].rename(columns={"share": "share_start", "avg_heat": "heat_start"})
+
+    end_rows = gf[gf["snapshot_date"] == gf["max_date"]][
+        ["platform", "cat_u", "tag_u", "share", "avg_heat"]
+    ].rename(columns={"share": "share_end", "avg_heat": "heat_end"})
+
+    out = span.merge(start_rows, on=["platform", "cat_u", "tag_u"], how="left") \
+              .merge(end_rows, on=["platform", "cat_u", "tag_u"], how="left")
+
+    out["share_delta"] = out["share_end"] - out["share_start"]
+    out["heat_delta"] = out["heat_end"] - out["heat_start"]
+
+    # 新书占比：窗口内 unique novels
+    d2 = d.drop_duplicates(["platform", "cat_u", "tag_u", "novel_uid"]).copy()
+    d2["created_date"] = pd.to_datetime(d2.get("created_date"), errors="coerce").dt.date
+
+    def _is_new_row(row) -> bool:
+        if row.get("platform") == "fanqie":
+            rf = str(row.get("rank_family") or "")
+            return "新书" in rf
+        cd = row.get("created_date")
+        return (pd.notna(cd) and s <= cd <= e)
+
+    d2["is_new"] = d2.apply(_is_new_row, axis=1)
+    nb = d2.groupby(["platform", "cat_u", "tag_u"], dropna=False).agg(
+        total_books=("novel_uid", "count"),
+        new_books=("is_new", "sum"),
+    ).reset_index()
+    nb["new_entry_ratio"] = nb["new_books"] / nb["total_books"].replace(0, np.nan)
+
+    out = out.merge(nb, on=["platform", "cat_u", "tag_u"], how="left")
+    out = out[out["total_books"].fillna(0) >= min_total_books].copy()
+
+    # 分平台标准化打分（简单可用）
+    def _z(s: pd.Series) -> pd.Series:
+        s = s.astype(float)
+        mu = np.nanmean(s)
+        sd = np.nanstd(s)
+        return (s - mu) / (sd + 1e-12)
+
+    out["score_share"] = out.groupby("platform")["share_delta"].transform(_z)
+    out["score_heat"] = out.groupby("platform")["heat_delta"].transform(_z)
+    out["score_new"] = out.groupby("platform")["new_entry_ratio"].transform(_z)
+    out["opportunity_score"] = out["score_share"].fillna(0) + out["score_heat"].fillna(0) + 0.8 * out["score_new"].fillna(0)
+
+    out = out.sort_values(["platform", "opportunity_score"], ascending=[True, False]).head(top_n)
     return out
 
 
@@ -407,14 +460,17 @@ def compute_cooccurrence_pairs(df: pd.DataFrame, cfg: MetricConfig) -> pd.DataFr
     counter = {}
     for _, row in tags_by_book.iterrows():
         tags = row["tag_u"]
-        if not tags or len(tags) < 2:
+        if len(tags) < 2:
             continue
         for a, b in combinations(tags, 2):
             counter[(a, b)] = counter.get((a, b), 0) + 1
 
     out = pd.DataFrame(
         [{"tag_a": k[0], "tag_b": k[1], "count": v} for k, v in counter.items()]
-    ).sort_values("count", ascending=False).head(cfg.top_k_pairs)
+    )
+    if out.empty:
+        return out
+    out = out.sort_values("count", ascending=False).head(cfg.top_k_pairs)
     return out
 
 
@@ -428,12 +484,15 @@ def compute_cooccurrence_triples(df: pd.DataFrame, cfg: MetricConfig) -> pd.Data
     counter = {}
     for _, row in tags_by_book.iterrows():
         tags = row["tag_u"]
-        if not tags or len(tags) < 3:
+        if len(tags) < 3:
             continue
         for a, b, c in combinations(tags, 3):
             counter[(a, b, c)] = counter.get((a, b, c), 0) + 1
 
     out = pd.DataFrame(
         [{"tag_a": k[0], "tag_b": k[1], "tag_c": k[2], "count": v} for k, v in counter.items()]
-    ).sort_values("count", ascending=False).head(cfg.top_k_triples)
+    )
+    if out.empty:
+        return out
+    out = out.sort_values("count", ascending=False).head(cfg.top_k_triples)
     return out

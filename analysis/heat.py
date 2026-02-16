@@ -15,15 +15,18 @@ def add_heat(df: pd.DataFrame, cfg: HeatConfig) -> pd.DataFrame:
     输入 df 必须含：platform, reading_count, total_recommend
     输出新增：
       heat_raw, heat_pct, heat_rz, heat_rz01, heat_mix
+
+    性能优化：
+    - 用向量化替代 apply(axis=1)
     """
     out = df.copy()
 
-    def _heat_raw(row) -> float:
-        if row["platform"] == "fanqie":
-            return row["reading_count"]
-        return row["total_recommend"]
-
-    out["heat_raw"] = out.apply(_heat_raw, axis=1)
+    # 向量化 heat_raw（避免 apply 性能瓶颈）
+    out["heat_raw"] = np.where(
+        out["platform"] == "fanqie",
+        out["reading_count"],
+        out["total_recommend"],
+    )
     out["heat_raw"] = pd.to_numeric(out["heat_raw"], errors="coerce")
 
     # 平台内 percentile（鲁棒）

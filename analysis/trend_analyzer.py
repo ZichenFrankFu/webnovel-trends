@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+import pandas as pd
+
 from analysis.data_access import connect_sqlite, load_rank_long_df
 from analysis.heat import HeatConfig, add_heat
 from analysis.metrics import (
@@ -14,6 +16,7 @@ from analysis.metrics import (
     compute_weekly_category_panel,
     compute_timewindow_category_rollup as compute_timewindow_rollup_category,
     compute_new_entry_ratio_compact,
+    compute_opening_opportunities,
     compute_cooccurrence_pairs,
     compute_cooccurrence_triples,
 )
@@ -45,22 +48,23 @@ class TrendAnalyzer:
             top_k_triples=30,
         )
 
-    def _make_assets(self, *, weekly, roll, report_assets_dir: str, topk: int) -> dict[str, dict[str, str]]:
-        """
-        生成可视化图片，返回相对路径（相对于 report md 的目录）
-        images[platform][key] = relative_path
-        """
+    def _make_assets(
+        self,
+        *,
+        weekly,
+        roll,
+        report_assets_dir: str,
+        topk: int,
+    ) -> dict[str, dict[str, str]]:
+        """Generate visualization images. Returns abs paths."""
         images: dict[str, dict[str, str]] = {"fanqie": {}, "qidian": {}}
 
-        # 平台拆开画图
         for p in ["fanqie", "qidian"]:
             r = roll[roll["platform"] == p].copy()
             w = weekly[weekly["platform"] == p].copy()
-
             if r.empty:
                 continue
 
-            # 1) Market share Top10 bar
             path_share = os.path.join(report_assets_dir, f"{p}_share_top10.png")
             save_bar_topk(
                 r,
@@ -70,9 +74,8 @@ class TrendAnalyzer:
                 out_path=path_share,
                 topk=min(10, topk),
             )
-            images[p]["share_top10"] = os.path.relpath(path_share, start=os.path.dirname(report_assets_dir))
+            images[p]["share_top10"] = os.path.abspath(path_share)
 
-            # 2) Heat Top10 bar
             path_heat = os.path.join(report_assets_dir, f"{p}_heat_top10.png")
             save_bar_topk(
                 r,
@@ -82,203 +85,178 @@ class TrendAnalyzer:
                 out_path=path_heat,
                 topk=min(10, topk),
             )
-            images[p]["heat_top10"] = os.path.relpath(path_heat, start=os.path.dirname(report_assets_dir))
+            images[p]["heat_top10"] = os.path.abspath(path_heat)
 
-            # 3) concentration_index line (按周)
             if not w.empty and "concentration_index" in w.columns:
-                # 先在榜单层聚合到周
-                ww = w.groupby(["week"])["concentration_index"].mean().reset_index()
-                path_conc = os.path.join(report_assets_dir, f"{p}_concentration_weekly.png")
+                ww = w.groupby(["week"], dropna=False)["concentration_index"].mean().reset_index()
+                path_conc = os.path.join(report_assets_dir, f"{p}_concentration_daily.png")
                 save_line_top_tags(
                     ww.assign(dummy="concentration"),
                     x_col="week",
                     y_col="concentration_index",
                     tag_col="dummy",
-                    title=f"{p} - concentration_index over weeks",
+                    title=f"{p} - concentration_index over days",
                     out_path=path_conc,
                     topk=1,
                 )
-                images[p]["concentration_weekly"] = os.path.relpath(path_conc, start=os.path.dirname(report_assets_dir))
-
-            # 4) Chance tags heat/share trend（取 roll 里 chance_score 前5的 tag）
-            if not w.empty:
-                r2 = r.copy()
-                r2["chance_score"] = (-r2["rank_slope"].fillna(0)) + r2["heat_slope"].fillna(0) + r2["share_slope"].fillna(0)
-                top_tags = r2.sort_values("chance_score", ascending=False)["tag_u"].head(5).tolist()
-                wt = w[w["tag_u"].isin(top_tags)].copy()
-                if not wt.empty:
-                    path_heat_tr = os.path.join(report_assets_dir, f"{p}_chance_heat_trend.png")
-                    save_line_top_tags(
-                        wt,
-                        x_col="week",
-                        y_col="avg_heat_raw",
-                        tag_col="tag_u",
-                        title=f"{p} - chance tags avg_heat trend",
-                        out_path=path_heat_tr,
-                        topk=min(5, len(top_tags)),
-                    )
-                    images[p]["chance_heat_trend"] = os.path.relpath(path_heat_tr, start=os.path.dirname(report_assets_dir))
-
-                    path_share_tr = os.path.join(report_assets_dir, f"{p}_chance_share_trend.png")
-                    save_line_top_tags(
-                        wt,
-                        x_col="week",
-                        y_col="tag_share",
-                        tag_col="tag_u",
-                        title=f"{p} - chance tags share trend",
-                        out_path=path_share_tr,
-                        topk=min(5, len(top_tags)),
-                    )
-                    images[p]["chance_share_trend"] = os.path.relpath(path_share_tr, start=os.path.dirname(report_assets_dir))
+                images[p]["concentration_daily"] = os.path.abspath(path_conc)
 
         return images
 
-    def run(self, args: AnalyzerArgs) -> tuple[str, str]:
-        """
-        返回 (md_text, report_path)
-        """
-        conn = connect_sqlite(args.db_path)
-
-        df = load_rank_long_df(
-            conn,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            platform=args.platform,
-            rank_family=args.rank_family,
-            rank_sub_cat=args.rank_sub_cat,
-        )
-
-        coverage = (
-            df.groupby("platform")["snapshot_date"]
-            .agg(min_date="min", max_date="max", n_days="nunique")
-            .reset_index()
-        )
-
-        # heat + unify tag/week
-        df = add_heat(df, self.heat_cfg)
-        df = add_unified_columns(df)
-
-        d0 = df.dropna(subset=["platform", "rank_family", "snapshot_date", "novel_uid"]).copy()
-
-        # ----------------------------
-        # Rank-list coverage stats (dedup by novel_uid)
-        # ----------------------------
-        d0 = df.dropna(subset=["platform", "rank_family", "snapshot_date", "novel_uid"]).copy()
-        d0["rank_sub_cat"] = d0["rank_sub_cat"].fillna("").astype(str).str.strip()
-
-        # (1) 平台维度：窗口期去重书籍数（可选）
-        unique_books_platform = (
-            d0.groupby("platform", dropna=False)["novel_uid"].nunique(dropna=True)
-            .reset_index()
-            .rename(columns={"novel_uid": "unique_books"})
-        )
-
-        # (2) 榜单-日：每天每个榜单抓取了多少本（去重 novel_uid）
-        daily_rank_books = (
-            d0.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "snapshot_date", "novel_uid"])
-            .groupby(["platform", "rank_family", "rank_sub_cat", "snapshot_date"], dropna=False)
-            .agg(daily_books=("novel_uid", "nunique"))
-            .reset_index()
-        )
-
-        # (3) 榜单维度：平均每天抓取量 + 抓取天数
-        ranklist_avg_daily = (
-            daily_rank_books
-            .groupby(["platform", "rank_family", "rank_sub_cat"], dropna=False)
-            .agg(
-                avg_daily_books=("daily_books", "mean"),
-                days=("snapshot_date", "nunique"),
-            )
-            .reset_index()
-        )
-
-        # (4) ✅ 关键口径：窗口期内该榜单出现过的 unique novels 数
-        ranklist_total_books = (
-            d0.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "novel_uid"])
-            .groupby(["platform", "rank_family", "rank_sub_cat"], dropna=False)
-            .agg(total_books=("novel_uid", "nunique"))
-            .reset_index()
-        )
-
-        ranklist_avg_daily = ranklist_avg_daily.merge(
-            ranklist_total_books,
-            on=["platform", "rank_family", "rank_sub_cat"],
-            how="left",
-        )
-
-        # 统一 subcat 显示（None/NaN -> ""）
-        ranklist_avg_daily["rank_sub_cat"] = ranklist_avg_daily["rank_sub_cat"].fillna("").astype(str).str.strip()
-
-        # weekly panel + rollup (tags)
-        weekly = compute_weekly_tag_panel(df, self.metric_cfg)
-        roll = compute_timewindow_rollup(weekly, self.metric_cfg)
-
-        # weekly panel + rollup (categories; cross-platform comparable)
-        weekly_cat = compute_weekly_category_panel(df, self.metric_cfg)
-        roll_cat = compute_timewindow_rollup_category(weekly_cat, self.metric_cfg)
-
-
-        # extra blocks
-        new_entry_compact = compute_new_entry_ratio_compact(df, args.start_date, args.end_date)
-        pairs2 = compute_cooccurrence_pairs(df, self.metric_cfg)
-        triples3 = compute_cooccurrence_triples(df, self.metric_cfg)
-
-        # report paths
+    def run(self, args: AnalyzerArgs):
+        os.makedirs(args.report_dir, exist_ok=True)
         report_id = args.report_id or f"{args.start_date}_{args.end_date}"
-        report_dir = args.report_dir
-        os.makedirs(report_dir, exist_ok=True)
-
-        report_path = os.path.join(report_dir, f"final_report_{report_id}.md")
-
-        # assets dir: outputs/reports/assets/<report_id>/
-        assets_dir = os.path.join(report_dir, "assets", report_id)
+        out_dir = os.path.join(args.report_dir, report_id)
+        os.makedirs(out_dir, exist_ok=True)
+        assets_dir = os.path.join(out_dir, "assets")
         os.makedirs(assets_dir, exist_ok=True)
 
-        # generate images (relative paths for md)
-        # 注意：report_path 在 report_dir 下，assets_dir 在 report_dir/assets/<id>
-        # 我们在 report.py 里直接用 rel path 写入 md
-        images = {"fanqie": {}, "qidian": {}}
+        conn = connect_sqlite(args.db_path)
         try:
+            df = load_rank_long_df(
+                conn,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                platform=args.platform,
+                rank_family=args.rank_family,
+                rank_sub_cat=args.rank_sub_cat,
+            )
+
+            if df is None or df.empty:
+                md = build_final_report(
+                    start_date=args.start_date,
+                    end_date=args.end_date,
+                    weekly=pd.DataFrame(),
+                    roll=pd.DataFrame(),
+                    weekly_cat=pd.DataFrame(),
+                    roll_cat=pd.DataFrame(),
+                    new_entry_compact=pd.DataFrame(),
+                    opening_opportunities=pd.DataFrame(),
+                    pairs2=pd.DataFrame(),
+                    triples3=pd.DataFrame(),
+                    images={},
+                    cfg=ReportConfig(top_k=args.top_k),
+                    coverage=pd.DataFrame(),
+                    ranklist_avg_daily=pd.DataFrame(),
+                )
+                report_path = os.path.join(out_dir, "final_report.md")
+                with open(report_path, "w", encoding="utf-8") as f:
+                    f.write(md)
+                return md, report_path
+
+            # heat + unified columns
+            df = add_heat(df, self.heat_cfg)
+            df = add_unified_columns(df)
+
+            weekly = compute_weekly_tag_panel(df, self.metric_cfg)
+            roll = compute_timewindow_rollup(weekly, self.metric_cfg)
+
+            weekly_cat = compute_weekly_category_panel(df, self.metric_cfg)
+            roll_cat = compute_timewindow_rollup_category(weekly_cat, self.metric_cfg)
+
+            new_entry_compact = compute_new_entry_ratio_compact(df, args.start_date, args.end_date)
+            opening_opportunities = compute_opening_opportunities(df, args.start_date, args.end_date)
+
+            pairs2 = compute_cooccurrence_pairs(df, self.metric_cfg)
+            triples3 = compute_cooccurrence_triples(df, self.metric_cfg)
+
+            # ----------------------------
+            # 数据覆盖（按平台：min/max/days_span/unique novels/unique snapshots）
+            # ----------------------------
+            d_cov = df.dropna(subset=["platform", "snapshot_date", "novel_uid"]).copy()
+            d_cov["snapshot_date"] = pd.to_datetime(d_cov["snapshot_date"], errors="coerce").dt.date
+
+            cov_books = (
+                d_cov.drop_duplicates(["platform", "novel_uid"])
+                .groupby("platform", dropna=False)["novel_uid"]
+                .nunique()
+                .reset_index(name="unique_novels_in_window")
+            )
+            cov_days = (
+                d_cov.drop_duplicates(["platform", "snapshot_date"])
+                .groupby("platform", dropna=False)["snapshot_date"]
+                .agg(min_date="min", max_date="max", unique_snapshots="nunique")
+                .reset_index()
+            )
+            cov_days["days_span"] = (
+                (pd.to_datetime(cov_days["max_date"]) - pd.to_datetime(cov_days["min_date"]))
+                .dt.days + 1
+            )
+            coverage = cov_days.merge(cov_books, on="platform", how="left")
+
+            # ----------------------------
+            # Rank-list coverage stats (dedup by novel_uid)
+            # ----------------------------
+            d0 = df.dropna(subset=["platform", "rank_family", "snapshot_date", "novel_uid"]).copy()
+            d0["snapshot_date"] = pd.to_datetime(d0["snapshot_date"], errors="coerce").dt.date
+            d0["rank_sub_cat"] = d0["rank_sub_cat"].fillna("").astype(str).str.strip()
+
+            daily_rank_books = (
+                d0.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "snapshot_date", "novel_uid"])
+                .groupby(["platform", "rank_family", "rank_sub_cat", "snapshot_date"], dropna=False)
+                .agg(daily_books=("novel_uid", "nunique"))
+                .reset_index()
+            )
+
+            ranklist_avg_daily = (
+                daily_rank_books
+                .groupby(["platform", "rank_family", "rank_sub_cat"], dropna=False)
+                .agg(
+                    avg_daily_books=("daily_books", "mean"),
+                    min_date=("snapshot_date", "min"),
+                    max_date=("snapshot_date", "max"),
+                    days_seen=("snapshot_date", "nunique"),
+                )
+                .reset_index()
+            )
+            ranklist_avg_daily["days_span"] = (
+                (pd.to_datetime(ranklist_avg_daily["max_date"]) - pd.to_datetime(ranklist_avg_daily["min_date"]))
+                .dt.days + 1
+            )
+
+            ranklist_total_books = (
+                d0.drop_duplicates(["platform", "rank_family", "rank_sub_cat", "novel_uid"])
+                .groupby(["platform", "rank_family", "rank_sub_cat"], dropna=False)
+                .agg(total_books=("novel_uid", "nunique"))
+                .reset_index()
+            )
+            ranklist_avg_daily = ranklist_avg_daily.merge(
+                ranklist_total_books,
+                on=["platform", "rank_family", "rank_sub_cat"],
+                how="left",
+            )
+
             images = self._make_assets(
                 weekly=weekly,
                 roll=roll,
                 report_assets_dir=assets_dir,
                 topk=args.top_k,
             )
-            # 修正 relpath 计算：以上函数用 dirname(assets_dir) 作为 base，
-            # 这里统一改成相对于 report_dir（md 所在目录）更稳妥
-            # => 重新计算一遍
-            for p in ["fanqie", "qidian"]:
-                fixed = {}
-                for k, abs_or_rel in images[p].items():
-                    # abs_or_rel 可能已是相对路径，转成绝对后再相对
-                    ap = abs_or_rel
-                    if not os.path.isabs(ap):
-                        ap = os.path.join(os.path.dirname(assets_dir), abs_or_rel)
-                    fixed[k] = os.path.relpath(ap, start=report_dir)
-                images[p] = fixed
-        except Exception:
-            # 可视化失败不阻断报告生成
-            images = None
+            for p in images:
+                for k in list(images[p].keys()):
+                    images[p][k] = os.path.relpath(images[p][k], out_dir)
 
-        md = build_final_report(
-            start_date=args.start_date,
-            end_date=args.end_date,
-            weekly=weekly,
-            roll=roll,
-            weekly_cat=weekly_cat,
-            roll_cat=roll_cat,
-            new_entry_compact=new_entry_compact,
-            pairs2=pairs2,
-            triples3=triples3,
-            images=images,
-            cfg=ReportConfig(top_k=args.top_k),
-            coverage=coverage,
-            ranklist_avg_daily=ranklist_avg_daily,
-        )
+            md = build_final_report(
+                start_date=args.start_date,
+                end_date=args.end_date,
+                weekly=weekly,
+                roll=roll,
+                weekly_cat=weekly_cat,
+                roll_cat=roll_cat,
+                new_entry_compact=new_entry_compact,
+                opening_opportunities=opening_opportunities,
+                pairs2=pairs2,
+                triples3=triples3,
+                images=images,
+                cfg=ReportConfig(top_k=args.top_k),
+                coverage=coverage,
+                ranklist_avg_daily=ranklist_avg_daily,
+            )
 
-        # write md
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(md)
+            report_path = os.path.join(out_dir, "final_report.md")
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(md)
 
-        return md, report_path
+            return md, report_path
+        finally:
+            conn.close()
