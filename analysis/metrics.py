@@ -53,7 +53,7 @@ def _derive_sub_cat(main_category: object) -> object:
 
 
 def unify_tag(row) -> object:
-    """Unified tag (tag_u) per Analysis.md.
+    """Unified tag (tag_u) per ANALYSIS.md.
 
     | platform | tag_u    |
     |----------|----------|

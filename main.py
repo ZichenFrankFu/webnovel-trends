@@ -13,17 +13,15 @@
 """
 
 from __future__ import annotations
-
 import argparse
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
-
 import config
-
-# 现有能力（不修改 run_once）
 from tasks.run_spiders_once import run_once
 from tasks.scheduler import TaskScheduler
+from spiders.antibot import FatalAntiBotException
+import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 

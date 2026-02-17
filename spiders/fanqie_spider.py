@@ -962,15 +962,35 @@ class FanqieSpider(BaseSpider):
                     return []
                 return self._format_existing_chapters(existing, target_chapter_count, publish_date="")
 
-            # 只有需要补全时才访问详情页
-            detail = self.fetch_novel_detail(novel_url, novel_id, seed=None)
-            # 如果 detail 页都拿不到有效信息，通常是被风控：直接返回已有章节，不继续打目录/章节
-            if not (detail.get("title") or "").strip() and existing_count == 0:
-                self.logger.error(
-                    f"[章节获取] detail page blocked for novel_id={novel_id}; skip chapter fetch to avoid escalating anti-bot")
-                return []
-            display_title = detail.get("title") or f"小说ID:{novel_id}"
-            publish_date = detail.get("publish_date", "")
+            # 先拉已有章节（用于 publish_date 兜底，也用于判断是否需要 detail）
+            existing_chapters: List[Dict[str, Any]] = []
+            if existing_count > 0:
+                existing_chapters = self._get_existing_chapters(novel_id, existing_count)
+
+            # publish_date 先用 DB 第一章的（如果有）
+            publish_date = ""
+            if existing_chapters:
+                publish_date = (existing_chapters[0].get("publish_date") or "").strip()
+
+            # ✅ 只有在“DB一章都没有”时，才强制抓 detail（省掉大量 detail 请求）
+            detail: Dict[str, Any] = {}
+            display_title = f"小说ID:{novel_id}"
+
+            if existing_count == 0:
+                detail = self.fetch_novel_detail(novel_url, novel_id, seed=None)
+
+                # detail 页被风控时：如果 DB 也没章，直接退出，别继续打目录/章节
+                if not (detail.get("title") or "").strip():
+                    self.logger.error(
+                        f"[章节获取] detail page blocked for novel_id={novel_id}; skip chapter fetch to avoid escalating anti-bot"
+                    )
+                    return []
+
+                display_title = detail.get("title") or display_title
+                publish_date = (detail.get("publish_date") or publish_date or "").strip()
+            else:
+                # DB 已有章节，display_title 不必强求；如想更好看，可选：用 DB 的 novel title（如果你 DBHandler 支持）
+                pass
 
             if existing_count >= target_chapter_count:
                 self.logger.info(f"[章节智能补全] 《{display_title}》 DB已有{existing_count}章 ≥ 目标{target_chapter_count}章，直接从数据库加载")
@@ -981,10 +1001,6 @@ class FanqieSpider(BaseSpider):
                     )
                     return []
                 return self._format_existing_chapters(existing, target_chapter_count, publish_date=publish_date)
-
-            existing_chapters: List[Dict[str, Any]] = []
-            if existing_count > 0:
-                existing_chapters = self._get_existing_chapters(novel_id, existing_count)
 
             need_count = target_chapter_count - existing_count
             self.logger.info(f"[章节智能补全] 《{display_title}》 需要抓取{need_count}章（已有{existing_count}章，目标{target_chapter_count}章）")
@@ -1374,11 +1390,14 @@ class FanqieSpider(BaseSpider):
             rank_index += 1
 
             try:
-                # 每处理 2-3 个榜单轮换一次代理
-                if self.proxy_pool and rank_index % random.randint(2, 3) == 0:
+                cfg = self._get_page_fetch_cfg() if hasattr(self, "_get_page_fetch_cfg") else {}
+                rotate_every = int(cfg.get("rotate_proxy_every_ranks", 0) or 0)
+
+                # 每 N 个榜单轮换一次代理（由 config 控制）
+                if rotate_every > 0 and self.proxy_pool and (rank_index % rotate_every == 0):
                     self._rotate_proxy()
-                    self.restart_driver(f"处理第{rank_index}个榜单后轮换代理")
-                    self._humanlike_sleep(3, 6)  # 代理切换后等待
+                    self.restart_driver(f"rotate proxy every {rotate_every} ranks (rank_index={rank_index})")
+                    self._humanlike_sleep(3, 6)
 
                 self.logger.info(f"[一键启动] 开始处理榜单: {rank_type} (第{rank_index}个榜单)")
 

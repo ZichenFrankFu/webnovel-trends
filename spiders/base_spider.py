@@ -1,6 +1,5 @@
 # spiders/base_spider.py
 from __future__ import annotations
-
 import copy
 import os
 import time
@@ -8,36 +7,46 @@ import json
 import logging
 import random
 from abc import ABC, abstractmethod
-from datetime import date, datetime
+from datetime import date
 from typing import Any, Dict, List, Optional, Tuple, Union, Sequence
 from urllib.parse import urljoin
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import InvalidSessionIdException, WebDriverException
-from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import config
 import undetected_chromedriver as uc
+from .antibot import (
+    AntiBotConfig,
+    AntiBotDetector,
+    AntiBotHandler,
+    AntiBotDetectedException,
+    FatalAntiBotException,
+)
 
+# --- patch uc destructor ---
+try:
+    _uc_orig_del = uc.Chrome.__del__
 
-class AntiBotDetectedException(Exception):
-    """反爬虫检测异常"""
+    def _uc_safe_del(self):
+        try:
+            _uc_orig_del(self)
+        except OSError as e:
+            if getattr(e, "winerror", None) == 6 or "WinError 6" in str(e):
+                return
+            raise
+        except Exception:
+            return
+
+    uc.Chrome.__del__ = _uc_safe_del
+except Exception:
     pass
 
 class BaseSpider(ABC):
-    """网络小说平台爬虫基类
-
-    为起点中文网、番茄小说等平台提供统一的爬虫接口和基础功能。
-    支持Selenium自动化爬取，处理反爬机制，日志记录等功能。
-    """
-
     def __init__(self, site_config: Dict[str, Any], db_handler: Any = None):
-        """初始化爬虫
-
+        """
         Args:
             site_config: 站点配置字典，包含base_url、rank_urls等
             db_handler: 数据库处理器实例，用于直接存储数据
@@ -84,6 +93,22 @@ class BaseSpider(ABC):
         if self.selenium_config.get('enabled', True):
             self._init_driver()
 
+        # anti-bot module
+        ab_cfg_dict = ((self.site_config or {}).get("antibot") or {})
+        crawler_cfg = getattr(self.config, "CRAWLER_CONFIG", {}) or {}
+        global_ab = (crawler_cfg.get("antibot") or {})  # 可选：全局默认
+        merged_ab = {**global_ab, **ab_cfg_dict}
+
+        self.antibot_cfg = AntiBotConfig(
+            min_html_length=int(merged_ab.get("min_html_length", 800)),
+            consecutive_threshold=int(merged_ab.get("consecutive_threshold", 3)),
+            cooldown_range=tuple(merged_ab.get("cooldown_range", (60, 180))),
+            mode=str(merged_ab.get("mode", "cooldown")),
+        )
+
+        self.antibot_detector = AntiBotDetector(self.antibot_cfg)
+        self.antibot_handler = AntiBotHandler(self.antibot_cfg)
+
     """设置日志记录器"""
     def _setup_logger(self) -> logging.Logger:
         logger = logging.getLogger(f'{self.name}_spider')
@@ -124,8 +149,8 @@ class BaseSpider(ABC):
     # ------------------------------------------------------------------
     # Anti-Block
     # ------------------------------------------------------------------
+    """应用 stealth JavaScript 隐藏自动化特征"""
     def _apply_stealth_js(self):
-        """应用 stealth JavaScript 隐藏自动化特征"""
         try:
             stealth_js = """
             // 隐藏 webdriver 属性
@@ -176,22 +201,21 @@ class BaseSpider(ABC):
         except Exception as e:
             self.logger.debug(f"注入 stealth JS 失败: {e}")
 
+    """从配置加载代理池"""
     def _init_proxy_pool(self):
-        """从配置加载代理池"""
         try:
             proxy_config = (self.site_config or {}).get("proxy_pool", [])
             if proxy_config:
                 self.proxy_pool = proxy_config
                 self.logger.info(f"初始化代理池，共 {len(self.proxy_pool)} 个代理")
             else:
-                # 也可以从环境变量或其他配置源加载
-                import os
                 proxy_env = os.environ.get('PROXY_POOL', '')
                 if proxy_env:
                     self.proxy_pool = [p.strip() for p in proxy_env.split(',') if p.strip()]
         except Exception as e:
             self.logger.warning(f"初始化代理池失败: {e}")
 
+    """代理轮换"""
     def _rotate_proxy(self) -> bool:
         if not self.proxy_pool:
             return False
@@ -200,11 +224,11 @@ class BaseSpider(ABC):
         self.logger.info(f"轮换代理: {self.current_proxy}")
         return True
 
+    """检查是否被反爬虫检测到，包含空白页面检测"""
     def _check_antibot_detected(self, soup: BeautifulSoup, html_length: int = 0) -> bool:
-        """检查是否被反爬虫检测到，包含空白页面检测"""
         try:
             # 1. 首先检查页面是否过短（空白页面检测）
-            min_content_length = 200  # 正常页面至少应该有200个字符
+            min_content_length = 200
             if html_length < min_content_length:
                 self.logger.warning(f"页面过短 ({html_length} 字符)，疑似反爬空白页面")
                 return True
@@ -288,37 +312,21 @@ class BaseSpider(ABC):
             return True
 
     # ------------------------------------------------------------------
-    # Selenium and webdriver 初始化
+    # Selenium and webdriver
     # ------------------------------------------------------------------
+    """合并global config和specific config"""
     def _build_selenium_config(self) -> Dict[str, Any]:
-        """
-        Merge: config.SELENIUM_CONFIG (global default)
-             + self.site_config['selenium_specific'] (site override)
-        """
         base = getattr(config, "SELENIUM_CONFIG", {}) or {}
         site_specific = (self.site_config or {}).get("selenium_specific", {}) or {}
         return self._deep_merge_dict(base, site_specific)
 
-    import undetected_chromedriver as uc
-    import random
-    import time
-
+    """使用 undetected_chromedriver 初始化驱动"""
     def _init_driver(self) -> bool:
-        """
-        使用 undetected_chromedriver 初始化驱动，兼容 Chrome 144/145+
-        """
         try:
             cfg = self.selenium_config or {}
             if not cfg.get("enabled", True):
                 self.logger.info("Selenium disabled by config.")
                 return False
-
-            # ---------- 可选：启动时清理驱动缓存（只运行一次）----------
-            # if not hasattr(self, '_cache_cleaned'):
-            #     import shutil
-            #     shutil.rmtree(os.path.expanduser("~/.undetected_chromedriver"), ignore_errors=True)
-            #     self._cache_cleaned = True
-            # ---------------------------------------------------------
 
             # 1. 创建 uc 专用的 ChromeOptions
             options = uc.ChromeOptions()
@@ -374,14 +382,13 @@ class BaseSpider(ABC):
 
             # 5. 启动 undetected_chromedriver（兼容版本处理）
             try:
-                # 🔥 关键修改：指定当前 Chrome 主版本 144
                 self.driver = uc.Chrome(
                     options=options,
-                    version_main=144  # 根据你的 Chrome 版本填写（144/145/...）
+                    version_main=144
                 )
             except Exception as e:
                 self.logger.warning(f"指定 version_main=144 失败，尝试自动匹配: {e}")
-                self.driver = uc.Chrome(options=options)  # 自动匹配
+                self.driver = uc.Chrome(options=options)
 
             # 6. 设置超时
             self.driver.set_page_load_timeout(int(cfg.get("page_load_timeout", 30)))
@@ -405,8 +412,28 @@ class BaseSpider(ABC):
             return False
 
     # ------------------------------------------------------------------
-    # Fetch Webpage vis BeautifulSoup
+    # Fetch Webpage via BeautifulSoup
     # ------------------------------------------------------------------
+    def _get_page_fetch_cfg(self) -> dict:
+        """
+        Merge page fetch configs in this order (later overrides earlier):
+        1) CRAWLER_CONFIG.page_fetch (global defaults)
+        2) CRAWLER_CONFIG.page_fetch_overrides (global overrides)
+        3) site_config.selenium_specific.page_fetch_overrides (site overrides)
+        4) site_config.page_fetch_overrides (backward compatible)
+        """
+        crawler_cfg = getattr(self.config, "CRAWLER_CONFIG", {}) or {}
+
+        global_fetch = (crawler_cfg.get("page_fetch", {}) or {})
+        global_overrides = (crawler_cfg.get("page_fetch_overrides", {}) or {})
+
+        selenium_specific = (self.site_config or {}).get("selenium_specific", {}) or {}
+        site_overrides = (selenium_specific.get("page_fetch_overrides", {}) or {})
+
+        legacy_site_overrides = (self.site_config or {}).get("page_fetch_overrides", {}) or {}
+
+        return {**global_fetch, **global_overrides, **site_overrides, **legacy_site_overrides}
+
     def _get_soup(
             self,
             url: str,
@@ -436,10 +463,7 @@ class BaseSpider(ABC):
           - auto restart on invalid session id
         """
         # ---- config defaults (global + site override) ----
-        crawler_cfg = getattr(self.config, "CRAWLER_CONFIG", {}) or {}
-        global_fetch = (crawler_cfg.get("page_fetch", {}) or {})
-        site_fetch = (self.site_config or {}).get("page_fetch_overrides", {}) or {}
-        cfg = {**global_fetch, **site_fetch}
+        cfg = self._get_page_fetch_cfg()
 
         _wait_sec = int(wait_sec if wait_sec is not None else cfg.get("default_wait_sec", 10))
         _max_retries = int(max_retries if max_retries is not None else cfg.get("max_page_retries", 3))
@@ -550,18 +574,20 @@ class BaseSpider(ABC):
                 html = self.driver.page_source or ""
                 html = self._postprocess_html(html)
 
-                if len(html) < min_html_length:
-                    # 连续风控计数
-                    self._consecutive_short_pages = int(getattr(self, "_consecutive_short_pages", 0) or 0) + 1
-                    raise AntiBotDetectedException(f"Page source too short: {len(html)}")
-                else:
+                soup = BeautifulSoup(html, "html.parser") if html else None
+
+                # anti-bot detect (module)
+                try:
+                    self.antibot_detector.detect(soup=soup, html=html, html_length=len(html))
                     self._consecutive_short_pages = 0
+                except AntiBotDetectedException:
+                    self._consecutive_short_pages = int(getattr(self, "_consecutive_short_pages", 0) or 0) + 1
+                    raise  # 交给外层 except AntiBotDetectedException 统一处理
 
-                soup = BeautifulSoup(html, "html.parser")
-
+                # title bad keywords / other checks 也可以继续保留在 detector，或留在这
                 title = ""
                 try:
-                    title = (soup.title.string if soup.title else "") or ""
+                    title = (soup.title.string if soup and soup.title else "") or ""
                 except Exception:
                     title = ""
 
@@ -595,26 +621,28 @@ class BaseSpider(ABC):
                     pass
                 continue
 
+
+
             except AntiBotDetectedException as e:
                 self.logger.warning(f"[页面获取] 失败 {attempt}/{total_attempts}: {url} ; error={e}")
-
-                # 到阈值就熔断冷却（配置化更好；这里先给默认）
-                n = int(cfg.get("antibot_consecutive_threshold", 3))
-                if int(getattr(self, "_consecutive_short_pages", 0) or 0) >= n:
-                    cooldown = cfg.get("antibot_cooldown_range", (60, 180))
-                    if not isinstance(cooldown, (list, tuple)) or len(cooldown) != 2:
-                        cooldown = (60, 180)
-                    sleep_s = random.uniform(float(cooldown[0]), float(cooldown[1]))
-
-                    self.logger.error(
-                        f"[anti-bot] detected (short html x{self._consecutive_short_pages}). cooldown {sleep_s:.1f}s and rotate proxy.")
-                    if self.proxy_pool:
-                        self._rotate_proxy()
-                    self.restart_driver(reason="anti-bot cooldown")
-                    time.sleep(sleep_s)
-
-                    # 熔断：直接放弃本 URL（不要继续重试撞墙）
+                try:
+                    self.antibot_handler.handle(
+                        logger=self.logger,
+                        url=url,
+                        consecutive_count=int(getattr(self, "_consecutive_short_pages", 0) or 0),
+                        rotate_proxy_fn=(self._rotate_proxy if self.proxy_pool else None),
+                        restart_driver_fn=self.restart_driver,
+                        close_driver_fn=self.close,
+                    )
+                except FatalAntiBotException:
+                    raise
+                if int(getattr(self, "_consecutive_short_pages", 0) or 0) >= int(
+                        self.antibot_cfg.consecutive_threshold):
                     return None
+                time.sleep(_retry_delay)
+                continue
+
+
 
             except Exception as e:
                 self.logger.warning(f"[页面获取] 失败 {attempt}/{total_attempts}: {url} ; error={e}")
@@ -650,23 +678,57 @@ class BaseSpider(ABC):
             scroll_pause_sec: Optional[float] = None,
             no_change_limit: int = 3,
     ) -> None:
-        return
+        sel_cfg = (self.site_config or {}).get("selenium_specific", {}) or {}
+        target_count = int(target_count or sel_cfg.get("target_count") or 0) or None
+        max_scroll_attempts = int(max_scroll_attempts or sel_cfg.get("max_scroll_attempts") or 10)
+        item_css = item_css or sel_cfg.get("item_css")  # 允许为空：为空就只按高度变化判断
+        scroll_pause_sec = float(scroll_pause_sec or sel_cfg.get("scroll_pause_sec") or 0.8)
+
+        last_cnt = -1
+        no_change = 0
+
+        for _ in range(max_scroll_attempts):
+            # 统计当前元素数
+            cnt = None
+            if item_css:
+                try:
+                    cnt = len(self.driver.find_elements("css selector", item_css))
+                except Exception:
+                    cnt = None
+
+            # 达标直接停
+            if target_count and cnt is not None and cnt >= target_count:
+                break
+
+            # 连续不增长则停
+            if cnt is not None:
+                if cnt == last_cnt:
+                    no_change += 1
+                else:
+                    no_change = 0
+                last_cnt = cnt
+                if no_change >= no_change_limit:
+                    break
+
+            # 执行滚动
+            try:
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            except Exception:
+                break
+            time.sleep(scroll_pause_sec)
 
     """_get_soup Hook: site-specific html processing (e.g., decrypt)"""
     def _postprocess_html(self, html: str) -> str:
         return html
 
+    """重启driver并应用新配置"""
     def restart_driver(self, reason: str = "") -> bool:
-        """重启driver并应用新配置"""
         try:
             if hasattr(self, 'driver') and self.driver:
                 try:
                     self.driver.quit()
                 except Exception:
                     pass
-
-            import time
-            import random
             time.sleep(random.uniform(2, 5))  # 随机延迟
 
             # 重新初始化driver
@@ -687,17 +749,11 @@ class BaseSpider(ABC):
             self.logger.error(f"重启driver失败: {e}")
             return False
 
+    """在爬取完一个榜单之后重启driver"""
     def restart_driver_after_rank(self, rank_type: str = "") -> None:
-        """
-        Call this at the end of processing one rank list (e.g., in QidianSpider.fetch_whole_rank loop).
-        Controlled by config: page_fetch_overrides.restart_driver_each_rank (default False).
-        """
-        crawler_cfg = getattr(self.config, "CRAWLER_CONFIG", {}) or {}
-        global_fetch = (crawler_cfg.get("page_fetch", {}) or {})
-        site_fetch = (self.site_config or {}).get("page_fetch_overrides", {}) or {}
-        cfg = {**global_fetch, **site_fetch}
-
+        cfg = self._get_page_fetch_cfg()
         restart_each_rank = bool(cfg.get("restart_driver_each_rank", False))
+
         if not restart_each_rank:
             return
 
@@ -712,6 +768,48 @@ class BaseSpider(ABC):
 
         self.logger.warning(f"[Selenium] restart driver after rank. rank_type={rank_type}")
         self._init_driver()
+
+    def _driver_is_alive(self) -> bool:
+        try:
+            d = getattr(self, "driver", None)
+            if d is None:
+                return False
+            # session_id 为空通常意味着 quit 过
+            sid = getattr(d, "session_id", None)
+            if not sid:
+                return False
+            # 轻量探测：访问 current_url 会触发与 driver 的通信
+            _ = d.current_url
+            return True
+        except Exception:
+            return False
+
+    def _restart_driver(self, reason: str = "") -> None:
+        try:
+            if getattr(self, "driver", None) is not None:
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+        finally:
+            self.driver = None
+        self.logger.warning(f"[Selenium] restart driver. reason={reason}".strip())
+        self._init_driver()
+
+    def close(self) -> None:
+        """关闭爬虫，释放资源"""
+        if self.driver:
+            try:
+                self.driver.quit()
+                self.logger.info(f"{self.name} Selenium driver closed")
+            except Exception as e:
+                self.logger.error(f"Failed to close driver: {e}")
+            finally:
+                self.driver = None
+
+        # 清理代理池引用
+        self.proxy_pool = []
+        self.current_proxy_index = 0
 
     # ------------------------------------------------------------------
     # Fetch Fallback Logic (当rank page获取信息失败时，在detail page补全信息）
@@ -763,6 +861,40 @@ class BaseSpider(ABC):
             if isinstance(t, str) and t.strip() and t.strip() not in unknown_set
         ]
         return len(valid) == 0
+
+    def _slice_chapter_infos_to_fetch(
+            self,
+            chapter_infos: Sequence[Any],
+            existing_count: int,
+            need_count: int,
+    ) -> List[Any]:
+        """
+        Generic slicing helper:
+        - skip first `existing_count` items
+        - take next `need_count` items
+        """
+        if not chapter_infos or need_count <= 0:
+            return []
+        start = max(0, int(existing_count))
+        end = start + int(need_count)
+        return list(chapter_infos[start:end])
+
+    """决定是否值得进详情页（避免重复提取）"""
+    def _needs_detail(self, item: Dict[str, Any]) -> bool:
+        # detail-only 字段缺失时才进
+        if not item.get("status"):
+            return True
+        if not item.get("total_words"):
+            return True
+        if item.get("total_recommend") is None:
+            return True
+
+        # 分类策略：rank 提取到主分类就不进详情页补分类
+        main_cat = (item.get("main_category") or "").strip()
+        if not main_cat or main_cat == "未知":
+            return True
+
+        return False
 
     # ------------------------------------------------------------------
     # Spider Functions
@@ -896,20 +1028,7 @@ class BaseSpider(ABC):
         self.logger.info(f"Daily task completed for {self.name}")
         return results
 
-    def close(self) -> None:
-        """关闭爬虫，释放资源"""
-        if self.driver:
-            try:
-                self.driver.quit()
-                self.logger.info(f"{self.name} Selenium driver closed")
-            except Exception as e:
-                self.logger.error(f"Failed to close driver: {e}")
-            finally:
-                self.driver = None
 
-        # 清理代理池引用
-        self.proxy_pool = []
-        self.current_proxy_index = 0
     # ------------------------------------------------------------------
     # Common Utils
     # ------------------------------------------------------------------
@@ -1033,50 +1152,6 @@ class BaseSpider(ABC):
                 min_time, max_time = max(0.0, base * 0.7), base * 1.3
 
         time.sleep(random.uniform(float(min_time), float(max_time)))
-
-    """决定是否值得进详情页（避免重复提取）"""
-    def _needs_detail(self, item: Dict[str, Any]) -> bool:
-        # detail-only 字段缺失时才进
-        if not item.get("status"):
-            return True
-        if not item.get("total_words"):
-            return True
-        if item.get("total_recommend") is None:
-            return True
-
-        # 分类策略：rank 提取到主分类就不进详情页补分类
-        main_cat = (item.get("main_category") or "").strip()
-        if not main_cat or main_cat == "未知":
-            return True
-
-        return False
-
-    def _driver_is_alive(self) -> bool:
-        try:
-            d = getattr(self, "driver", None)
-            if d is None:
-                return False
-            # session_id 为空通常意味着 quit 过
-            sid = getattr(d, "session_id", None)
-            if not sid:
-                return False
-            # 轻量探测：访问 current_url 会触发与 driver 的通信
-            _ = d.current_url
-            return True
-        except Exception:
-            return False
-
-    def _restart_driver(self, reason: str = "") -> None:
-        try:
-            if getattr(self, "driver", None) is not None:
-                try:
-                    self.driver.quit()
-                except Exception:
-                    pass
-        finally:
-            self.driver = None
-        self.logger.warning(f"[Selenium] restart driver. reason={reason}".strip())
-        self._init_driver()
 
     # ------------------------------------------------------------------
     # Database Operations
@@ -1260,23 +1335,6 @@ class BaseSpider(ABC):
             ch["chapter_num"] = idx
         return all_chapters
 
-    def _slice_chapter_infos_to_fetch(
-            self,
-            chapter_infos: Sequence[Any],
-            existing_count: int,
-            need_count: int,
-    ) -> List[Any]:
-        """
-        Generic slicing helper:
-        - skip first `existing_count` items
-        - take next `need_count` items
-        """
-        if not chapter_infos or need_count <= 0:
-            return []
-        start = max(0, int(existing_count))
-        end = start + int(need_count)
-        return list(chapter_infos[start:end])
-
     def db_get_chapter_count(db: Any, *, platform: str, platform_novel_id: str) -> int:
         """
         Return number of stored chapters for (platform, platform_novel_id) in first_n_chapters.
@@ -1326,7 +1384,6 @@ class BaseSpider(ABC):
             return 0
         except Exception:
             return 0
-
 
 class MockResponse:
     """模拟requests.Response对象，用于测试"""

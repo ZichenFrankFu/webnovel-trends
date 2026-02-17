@@ -63,7 +63,6 @@ class QidianSpider(BaseSpider):
         merged_cfg = self._deep_merge_dict(root_cfg, site_config or {})
 
         super().__init__(merged_cfg, db_handler=db_handler)
-        self.config = merged_cfg
 
         self.default_chapter_count = int(site_config.get("chapter_extraction_goal", 5))
         self.rank_type_map: Dict[str, RankIdentity] = self._build_rank_type_map()
@@ -2179,17 +2178,6 @@ class QidianSpider(BaseSpider):
             source_url=(self.site_config.get("rank_urls") or {}).get(rank_type, ""),
         )
 
-        # 设置标题为主标题
-        if snapshot_id and self.db_handler:
-            # 重新保存，确保标题被设置为主标题
-            snapshot_id = self.save_rank_snapshot(
-                rank_type=rank_type,
-                items=enriched,
-                snapshot_date=snapshot_date,
-                source_url=(self.site_config.get("rank_urls") or {}).get(rank_type, ""),
-                make_title_primary=True,  # 添加这个参数
-            )
-
         # 可选保存章节
         if enrich_chapters and self.db_handler and hasattr(self.db_handler, "upsert_first_n_chapters"):
             for b in enriched:
@@ -2353,7 +2341,6 @@ class QidianSpider(BaseSpider):
     # ------------------------------------------------------------------
     """Fetch all configured rank lists and return a flattened list of items"""
     def fetch_whole_rank(self) -> List[Dict[str, Any]]:
-        """Fetch all configured rank lists and return a flattened list of items."""
         all_books: List[Dict[str, Any]] = []
 
         rank_urls = self.site_config.get("rank_urls") or {}

@@ -3,9 +3,13 @@ import os
 # Root Directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# ------------------------------------------------------------------
+# Site configs
+# ------------------------------------------------------------------
 WEBSITES = {
     'qidian': {
         'name': '起点中文网',
+        'base_url': 'https://www.qidian.com',
         'rank_urls': {
             '月票榜': 'https://www.qidian.com/rank/yuepiao/page{page}/',          # 月票榜
             '畅销榜': 'https://www.qidian.com/rank/hotsales/page{page}/',        # 畅销榜
@@ -24,21 +28,20 @@ WEBSITES = {
             "阅读指数榜": {"rank_family": "阅读指数榜", "rank_sub_cat": ""},
             "推荐榜": {"rank_family": "推荐榜", "rank_sub_cat": ""},
             "收藏榜": {"rank_family": "收藏榜", "rank_sub_cat": ""},
-
             # 新书榜
             "签约作者新书榜": {"rank_family": "新书榜", "rank_sub_cat": "签约作者"},
             "公众作者新书榜": {"rank_family": "新书榜", "rank_sub_cat": "公众作者"},
             "新人签约新书榜": {"rank_family": "新书榜", "rank_sub_cat": "新人签约"},
             "新人作者新书榜": {"rank_family": "新书榜", "rank_sub_cat": "新人作者"},
         },
-        'base_url': 'https://www.qidian.com',
         'novel_types': ['玄幻','奇幻',
                         '武侠','仙侠',
                         '都市','现实',
                         '军事','历史',
                         '游戏','体育',
                         '科幻','诸天无限',
-                        '悬疑','轻小说','短篇'],
+                        '悬疑','轻小说','短篇'
+                        ],
         'sub_to_main_map' : {
             # 玄幻相关
             "东方玄幻": "玄幻",
@@ -129,22 +132,17 @@ WEBSITES = {
             "搞笑吐槽": "轻小说",
             "恋爱日常": "轻小说",
         },
-        'pages_per_rank': 5,
-        'chapter_extraction_goal': 5,
-        'max_log_chapters': 5,
         'selenium_specific': {
-            'method': 'dynamic',
-            # 榜单页：等榜单列表结构
+            "method": "dynamic",
             "rank_wait_css": "div.rank-list, div.rank-body, ul.rank-list, li[data-rid], body",
-            # 详情页：等书籍信息
             "detail_wait_css": ".info-label, .info-count-item, h1",
-            # 目录页：等章节列表或章节链接
             "catalog_wait_css": ".catalog-content-wrap, .volume-wrap, .catalog-content, a[href*='/chapter/']",
-            'page_fetch_overrides': {
-                'page_load_sec': 10,
-                'ready_state_sec': 8,
-                'wait_css_sec': 8,
-                'wait_css_required': True,
+            "page_fetch_overrides": {
+                "page_load_sec": 10,
+                "ready_state_sec": 8,
+                "wait_css_sec": 8,
+                "wait_css_required": True,
+                "restart_driver_each_rank": False,
             },
         },
         # Rank 页是主来源的字段
@@ -174,6 +172,9 @@ WEBSITES = {
 
     'fanqie': {
         'name': '番茄小说',
+        'base_url': 'https://fanqienovel.com',
+        'chapter_extraction_goal': 5,
+        'pages_per_rank': 1,
         'rank_urls': {
             '阅读榜西方奇幻': 'https://fanqienovel.com/rank/1_2_1141',
             '阅读榜科幻末世': 'https://fanqienovel.com/rank/1_2_8',
@@ -191,6 +192,7 @@ WEBSITES = {
             '新书榜动漫衍生': 'https://fanqienovel.com/rank/1_1_718',
         },
         "rank_type_map": {
+            # 阅读榜
             "阅读榜西方奇幻": {"rank_family": "阅读榜", "rank_sub_cat": "西方奇幻"},
             "阅读榜科幻末世": {"rank_family": "阅读榜", "rank_sub_cat": "科幻末世"},
             "阅读榜都市高武": {"rank_family": "阅读榜", "rank_sub_cat": "都市高武"},
@@ -207,30 +209,27 @@ WEBSITES = {
             "新书榜都市脑洞": {"rank_family": "新书榜", "rank_sub_cat": "都市脑洞"},
             "新书榜动漫衍生": {"rank_family": "新书榜", "rank_sub_cat": "动漫衍生"},
         },
-        'base_url': 'https://fanqienovel.com',
-        'chapter_extraction_goal': 5,
-        'pages_per_rank': 1,
         'selenium_specific': {
-            'method': 'scroll_load',   # 滚动加载方式
-            'target_count': 30,        # 目标加载数量
-            'scroll_delay': 2,         # 滚动延迟
-            'max_scroll_attempts': 10, # 最大滚动尝试次数
+            "method": "scroll_load",
+            "target_count": 30,
+            "scroll_delay": 2,
+            "max_scroll_attempts": 10,
             "wait_css": ".rank-book-item, .book-item, a[href*='/page/'], a[href*='/book/']",
-            # detail 页单独的 wait_css
             "detail_wait_css": ".info-label, .info-count-item, meta[property='og:title'], h1",
-            # detail 页是否滚动（默认不滚）
             "detail_is_scrolling": False,
             "chapter_wait_css": ".muye-reader-content, .reader-content, h1.muye-reader-title, h1",
             "chapter_is_scrolling": False,
-            'page_fetch_overrides': {
-                'page_load_sec': 8,
-                'ready_state_sec': 6,
-                'wait_css_sec': 10,
-                'wait_css_required': True,
-                'min_html_length': 1200,
+            "page_fetch_overrides": {
+                "page_load_sec": 8,
+                "ready_state_sec": 6,
+                "wait_css_sec": 10,
+                "wait_css_required": True,
+                "min_html_length": 1200,
+                "restart_driver_each_rank": True,
+                "rotate_proxy_every_ranks": 3,
             },
-            'use_proxy': False,
-            'headless': False,
+            "use_proxy": False,
+            "headless": False,
         },
         # Fanqie Rank 页主来源字段
         "rank_fields_primary": [
@@ -247,7 +246,7 @@ WEBSITES = {
             "main_category",
             "tags",
         ],
-        # Detail 页 fallback 触发规则（Fanqie rank 页通常缺分类/标签）
+        # Detail 页 fallback 触发规则
         "detail_fallback_rules": {
             "title": {"when_empty": True},
             "author": {"when_empty": True},
@@ -260,6 +259,9 @@ WEBSITES = {
     }
 }
 
+# ------------------------------------------------------------------
+# Database
+# ------------------------------------------------------------------
 DATABASE = {
     'path': os.path.join(BASE_DIR, 'outputs', 'data', 'novels.db'),
     'tables': {
@@ -285,13 +287,9 @@ OUTPUT_PATHS = {
 for path in OUTPUT_PATHS.values():
     os.makedirs(path, exist_ok=True)
 
-ANALYSIS = {
-    'top_n': 50,
-    'history_days': 30,
-    'trend_window': 7,
-}
-
-# Selenium全局配置
+# ------------------------------------------------------------------
+# Selenium global config
+# ------------------------------------------------------------------
 SELENIUM_CONFIG = {
     "enabled": True,
     'browser': 'chrome',
@@ -369,18 +367,18 @@ SELENIUM_CONFIG = {
     },
 }
 
-# 爬虫通用配置
+# ------------------------------------------------------------------
+# Crawler config
+# ------------------------------------------------------------------
 CRAWLER_CONFIG = {
     'max_retries': 4,
     'retry_delay': 2,
-    'use_proxy': False,
-    'proxy_pool': [],
     'log_level': 'INFO',
     'cache_enabled': True,
     'cache_expiry': 3600,
 
     # 反爬代理
-    'use_proxy': True,  # 启用代理
+    'use_proxy': False,
     'proxy_pool': [
         # === 免费代理（稳定性较差）===
         'http://103.156.17.69:8080',    # 印尼
@@ -437,12 +435,17 @@ CRAWLER_CONFIG = {
         # 每 N 次 driver.get 重启一次
         "restart_driver_every_n_get": 200,
         # 每个榜单跑完就重启一次
-        "restart_driver_each_rank": True,
+        "restart_driver_each_rank": False,
     },
+    "antibot": {
+        "mode": "fatal",
+        "min_html_length": 800,
+        "consecutive_threshold": 3,
+        "cooldown_range": (60, 180),
+      }
 
 }
 
-# config.py 中添加
 ANTI_BLOCK_CONFIG = {
     'proxy': {
         'enabled': True,  # 根据需求开启
@@ -495,6 +498,9 @@ SCHEDULER = {
     "jitter_sec": 5,
 }
 
+# ------------------------------------------------------------------
+# Analysis weights (analysis 模块通常会用到；不确定你是否接入，但先保留)
+# ------------------------------------------------------------------
 ANALYSIS_CONFIG = {
     "top_k": 30,
     "rank_scale": 1.0,
