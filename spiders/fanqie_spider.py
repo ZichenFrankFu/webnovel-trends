@@ -10,7 +10,7 @@ Phase 1 目标：
 - NOVELS.main_category：只存主分类（如"西方奇幻""科幻末世"）
 - 起点"副分类"当作一个 tag 进入 TAGS / NOVEL_TAG_MAP （如"奇幻""穿越"）
 - RANK_LISTS：rank_family 存大榜（阅读榜/新书榜）
-  rank_sub_cat 番茄小说无副分类
+  rank_sub_cat 番茄小说主分类即为榜单副分类（如"西方奇幻""科幻末世"）
 - RANK_ENTRIES：番茄使用 reading_count（在读）作为热度参考
 """
 from __future__ import annotations
@@ -972,7 +972,7 @@ class FanqieSpider(BaseSpider):
             if existing_chapters:
                 publish_date = (existing_chapters[0].get("publish_date") or "").strip()
 
-            # ✅ 只有在“DB一章都没有”时，才强制抓 detail（省掉大量 detail 请求）
+            # 只有在“DB一章都没有”时，才强制抓 detail（省掉大量 detail 请求）
             detail: Dict[str, Any] = {}
             display_title = f"小说ID:{novel_id}"
 
@@ -1262,7 +1262,10 @@ class FanqieSpider(BaseSpider):
             self.logger.warning("db_handler missing or lacks save_rank_snapshot; skip saving.")
             return None
 
-        ident = self.rank_type_map.get(rank_type, RankIdentity(rank_family=rank_type))
+        if rank_type not in self.rank_type_map:
+            raise ValueError(f"rank_type '{rank_type}' not found in rank_type_map")
+
+        ident = self.rank_type_map[rank_type]
         snapshot_date = snapshot_date or self._today_str()
 
         return self.db_handler.save_rank_snapshot(

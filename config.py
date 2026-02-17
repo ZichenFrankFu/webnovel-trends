@@ -281,7 +281,6 @@ OUTPUT_PATHS = {
     'logs': os.path.join(BASE_DIR, 'outputs', 'logs'),
     'reports': os.path.join(BASE_DIR, 'outputs', 'reports'),
     'visualizations': os.path.join(BASE_DIR, 'outputs', 'reports', 'visualizations'),
-    'screenshots': os.path.join(BASE_DIR, 'outputs', 'screenshots'),
 }
 
 for path in OUTPUT_PATHS.values():
