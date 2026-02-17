@@ -42,37 +42,72 @@ python main.py once --platform fanqie --chapter_count 5 --newbook_chapter_count 
 ```text
 webnovel_trends/
 ├── analysis/
-├── run_analysis.py             # CLI 入口
-    ├── trend_analyzer.py       # 主要 orchestrator
-    ├── data_access.py          # SQL / df 读取
-    ├── heat.py                 # heat_raw/pct/robust_z/mix
-    ├── metrics.py              # 计算所有指标
-    └── report.py               # 生成最终 Markdown report
+│   ├── ANALYSIS.md                 # 分析板块documentation
+│   ├── run_analysis.py             # CLI 入口
+│   ├── trend_analyzer.py           # 主要 orchestrator
+│   ├── data_access.py              # SQL / df 读取
+│   ├── heat.py                     # 热度指标计算
+│   ├── metrics.py                  # 计算所有指标
+│   └── report.py                   # 生成最终 Markdown report
 ├── database/
-│   └── db_schema.py         # 数据库schema设置
-│   └── db_handler.py        # 数据库交互操作
+│   ├── DATABASE.md                 # 数据库板块documentation
+│   └── db_schema.py                # 数据库schema设置
+│   └── db_handler.py               # 数据库交互操作
 ├── tasks/
-│   └── scheduler.py         # 任务调度器
-│   └── run_spiders_once.py  # 跑所有spider一次的任务
+│   └── scheduler.py                # 任务调度器
+│   └── run_spiders_once.py         # 跑所有spider一次的任务
 ├── spiders/
-│   ├── base_spider.py       # 爬虫基类
-│   ├── qidian_spider.py     # 起点爬虫
-│   ├── fanqie_spider.py     # 番茄爬虫
-│   ├── fanqie_font_decoder  # 番茄解码
+│   ├── base_spider.py              # 爬虫基类
+│   ├── qidian_spider.py            # 起点爬虫
+│   ├── fanqie_spider.py            # 番茄爬虫
+│   ├── fanqie_font_decoder         # 番茄解码
+│   ├── antibot.py                  # 反爬虫检测控制
 ├── outputs/
-│   ├── logs/                # 日志文件
-│   ├── data/                # 数据存储
-│   └── reports/             # 分析报告
-│   └── screenshots/         # 快照
-├── tests/                   # 测试
-│   ├── base_test.py         # 测试基类
-│   ├── qidian_test.py       # 起点爬虫测试
-│   ├── fanqie_test.py       # 番茄爬虫测试
-├── config.py                # 配置文件
-├── requirements.txt         # 依赖列表
-├── main.py                  # 主程序入口
-└── README.md                # 项目说明
-└── DB_Doc.md                # 数据库说明
+│   ├── logs/                       # 日志文件
+│   ├── data/                       # 数据存储
+│   └── reports/                    # 分析报告
+├── tests/
+│   ├── TEST.md                     # 测试板块documentation
+│   ├── base_test.py                # 测试基类
+│   ├── qidian_test.py              # 起点爬虫测试
+│   ├── fanqie_test.py              # 番茄爬虫测试
+├── ui/
+│   ├── backend/                    # FastAPI 后端（任务/日志/报告/DB 只读查询）
+│   │   ├── requirements.txt        # UI 后端依赖
+│   │   └── app/
+│   │       ├── __init__.py
+│   │       ├── main.py             # FastAPI 入口
+│   │       ├── settings.py         # 路径/环境配置
+│   │       ├── store.py            # UI TaskStore（jsonl）
+│   │       ├── runner.py           # subprocess 启动 main.py once + 写日志
+│   │       ├── utils.py            # 读取 repo config.py / paths / rank_keys
+│   │       └── routers/
+│   │           ├── config_api.py   # /api/config（schema + 保存 config_runs）
+│   │           ├── tasks_api.py    # /api/tasks（启动 spider + 读日志）
+│   │           ├── reports_api.py  # /api/reports（报告索引 + 预览）
+│   │           └── db_api.py       # /api/db（只读查询 + 诊断）
+│   └── frontend/                   # React 前端（控制台，后续可扩展成 editor）
+│       ├── package.json
+│       ├── vite.config.ts
+│       ├── tsconfig.json
+│       └── src/
+│           ├── main.tsx
+│           ├── App.tsx             # Layout + 导航
+│           ├── api/
+│           │   ├── client.ts       # fetch 封装
+│           │   └── types.ts        # TS 类型
+│           ├── components/
+│           │   └── LogViewer.tsx   # 增量拉日志
+│           └── pages/
+│               ├── ConfigPage.tsx  # 配置生成/保存
+│               ├── RunnerPage.tsx  # 启动任务/查看日志
+│               ├── ReportsPage.tsx # 报告预览
+│               └── DatabasePage.tsx# DB 浏览/诊断
+├── config.py                       # 配置文件
+├── requirements.txt                # 依赖列表
+├── main.py                         # 主程序入口
+└── README.md                       # 项目说明
+└── DB_Doc.md                       # 数据库说明
 ```
 
 ### 3.2 Database Structure (ER-Diagram)

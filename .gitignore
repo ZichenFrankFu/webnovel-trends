@@ -17,3 +17,20 @@ tests/test_output/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Node
+node_modules/
+package-lock.json
+ui/frontend/node_modules/
+ui/frontend/package-lock.json
+ui/backend/node_modules/
+ui/backend/package-lock.json
+
+# Logs
+outputs/logs/*
+outputs/ui_tasks/*
+outputs/config_runs/*
+
+# OS
+.DS_Store
+Thumbs.db
