@@ -637,10 +637,6 @@ class DatabaseHandler:
           - fanqie uses reading_count
         """
 
-        """番茄小说的rank_sub_cat必须为空"""
-        if platform == "fanqie":
-            rank_sub_cat = ""
-
         snap = _date_str(snapshot_date)
 
         payloads: List[NovelPayload] = []

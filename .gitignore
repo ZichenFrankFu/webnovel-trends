@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 venv/
 .env
-__pycache__/
+*/__pycache__/
 
 # logs
 logs/
@@ -12,7 +12,7 @@ logs/
 outputs/
 
 # your tests folder
-test_output/
+tests/test_output/
 
 # OS junk
 .DS_Store

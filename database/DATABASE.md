@@ -211,3 +211,77 @@ erDiagram
 | publish_date    | DATE | 章节发布日期          |
 
 ---
+
+### 3. 快速查询query
+#### 3.1 全量检视
+```text
+SELECT
+    t.title                                    AS title,
+    n.author                                   AS author,
+    n.intro                                    AS intro,
+    rs.snapshot_date                           AS snapshot_date,
+    rl.rank_family                             AS rank_family,
+    rl.rank_sub_cat                            AS rank_sub_cat,
+    re.rank                                    AS rank,
+    re.total_recommend                         AS total_recommend,
+    GROUP_CONCAT(DISTINCT tg.tag_name)         AS tags
+FROM NOVELS AS n
+JOIN NOVEL_TITLES AS t
+    ON n.novel_uid = t.novel_uid
+   AND t.is_primary = 1
+JOIN RANK_ENTRIES AS re
+    ON n.novel_uid = re.novel_uid
+JOIN RANK_SNAPSHOTS AS rs
+    ON re.snapshot_id = rs.snapshot_id
+JOIN RANK_LISTS AS rl
+    ON rs.rank_list_id = rl.rank_list_id
+LEFT JOIN NOVEL_TAG_MAP AS ntm
+    ON n.novel_uid = ntm.novel_uid
+LEFT JOIN TAGS AS tg
+    ON ntm.tag_id = tg.tag_id
+WHERE n.platform = 'qidian'
+GROUP BY
+    t.title,
+    n.author,
+    n.intro,
+    rs.snapshot_date,
+    rl.rank_family,
+    rl.rank_sub_cat,
+    re.rank,
+    re.total_recommend
+ORDER BY
+    rs.snapshot_date DESC,
+    rl.rank_family ASC,
+    rl.rank_sub_cat ASC,
+    re.rank ASC;
+```
+#### 3.2 查看每个 snapshot 的完整榜单明细
+```text
+SELECT
+    s.snapshot_id,
+    s.snapshot_date,
+    rl.platform,
+    rl.rank_family,
+    rl.rank_sub_cat,
+    e.rank,
+    nt.title,
+    n.author
+FROM rank_entries e
+JOIN rank_snapshots s
+    ON s.snapshot_id = e.snapshot_id
+JOIN rank_lists rl
+    ON rl.rank_list_id = s.rank_list_id
+JOIN novels n
+    ON n.novel_uid = e.novel_uid
+JOIN novel_titles nt
+    ON nt.novel_uid = n.novel_uid
+   AND nt.is_primary = 1
+ORDER BY
+    s.snapshot_date,
+    rl.platform,
+    rl.rank_family,
+    rl.rank_sub_cat,
+    s.snapshot_id,
+    e.rank;
+
+```

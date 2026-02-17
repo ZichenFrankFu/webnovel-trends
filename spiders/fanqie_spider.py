@@ -1169,7 +1169,21 @@ class FanqieSpider(BaseSpider):
 
             enriched = dict(book)
 
-            if fetch_detail:
+            # -----------------------------
+            # 关键：rank页短路，避免进 detail page
+            # -----------------------------
+            pid = (enriched.get("platform_novel_id") or enriched.get("novel_id") or "").strip()
+            target_n = int(chapter_count or self.default_chapter_count)
+
+            skip_detail_for_this_book = False
+            if fetch_detail and pid and target_n > 0:
+                if self._db_has_enough_opening_chapters(pid, target_n):
+                    skip_detail_for_this_book = True
+                    self.logger.info(
+                        f"[prefetch-skip] rank命中DB且已存前{target_n}章，跳过detail页: title=《{title}》 id={pid}"
+                    )
+
+            if fetch_detail and not skip_detail_for_this_book:
                 detail = self.fetch_novel_detail(
                     enriched.get("url", ""),
                     enriched.get("platform_novel_id", ""),

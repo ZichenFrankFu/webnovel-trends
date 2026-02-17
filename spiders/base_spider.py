@@ -996,9 +996,16 @@ class BaseSpider(ABC):
 
                 # 保存到数据库（如果有数据库处理器）
                 if self.db_handler and hasattr(self.db_handler, "save_rank_snapshot"):
+                    rank_type_map = self.site_config.get("rank_type_map", {})
+                    ident = rank_type_map.get(rank_type)
+
+                    if not ident:
+                        raise ValueError(f"rank_type '{rank_type}' not found in rank_type_map")
+
                     snapshot_id = self.db_handler.save_rank_snapshot(
                         platform=self.name,
-                        rank_family=rank_type,
+                        rank_family=ident["rank_family"],
+                        rank_sub_cat=ident["rank_sub_cat"],
                         snapshot_date=self._today_str(),
                         items=enriched_items,
                         source_url=self.site_config.get("rank_urls", {}).get(rank_type, ""),
@@ -1384,6 +1391,28 @@ class BaseSpider(ABC):
             return 0
         except Exception:
             return 0
+
+    def _db_has_enough_opening_chapters(self, platform_novel_id: str, target_chapter_count: int) -> bool:
+        """
+        若 DB 中该书已存的 first_n_chapters 数量 >= target，则返回 True。
+        用于在 rank 页直接短路，跳过 detail page。
+        """
+        if not platform_novel_id or not self.db_handler:
+            return False
+        if not hasattr(self.db_handler, "get_first_n_chapter_count"):
+            return False
+
+        try:
+            cnt = int(self.db_handler.get_first_n_chapter_count(
+                platform="fanqie",
+                platform_novel_id=str(platform_novel_id).strip()
+            ) or 0)
+            return cnt >= int(target_chapter_count or 0)
+        except Exception as e:
+            # DB 查询失败时，不做短路，继续走原逻辑（更安全）
+            self.logger.debug(f"[prefetch-skip] get_first_n_chapter_count failed id={platform_novel_id}: {e}")
+            return False
+
 
 class MockResponse:
     """模拟requests.Response对象，用于测试"""
