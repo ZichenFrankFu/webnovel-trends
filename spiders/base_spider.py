@@ -80,7 +80,7 @@ class BaseSpider(ABC):
             self.current_proxy = self.proxy_pool[0]
 
         # 反爬检测相关
-        self.antibot_keywords = ['验证码', 'captcha', '访问限制', 'rate limit', '403', '访问异常', '安全验证']
+        self.antibot_keywords = ['验证码', 'captcha', '访问限制', '安全验证']
 
         # 缓存
         self.book_cache: Dict[str, Dict[str, Any]] = {}
@@ -238,7 +238,7 @@ class BaseSpider(ABC):
 
             # 检查是否包含反爬关键词
             antibot_patterns = [
-                '验证码', 'captcha', '访问限制', 'rate limit', '403', '访问异常',
+                '验证码', 'captcha', '访问限制', 'rate limit', '访问异常',
                 '安全验证', '请完成验证', 'human verification', 'robot check',
                 'security check', 'access denied', 'denied access',
                 'anti-spam', '反爬虫', '防采集'
@@ -251,10 +251,7 @@ class BaseSpider(ABC):
 
             # 3. 检查页面标题
             title = soup.title.string.lower() if soup.title else ""
-            antibot_titles = [
-                '验证', 'captcha', '安全验证', '访问限制', '403', 'access denied',
-                'robot check', 'human verification', 'verification required'
-            ]
+            antibot_titles = []
             for antibot_title in antibot_titles:
                 if antibot_title in title:
                     self.logger.warning(f"检测到反爬标题: {title}")

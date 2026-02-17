@@ -21,16 +21,15 @@ class AntiBotConfig:
     min_html_length: int = 800
     min_body_text_length: int = 50
     antibot_patterns: Tuple[str, ...] = (
-        "验证码", "captcha", "访问限制", "rate limit", "403", "访问异常",
-        "安全验证", "请完成验证", "human verification", "robot check",
-        "security check", "access denied", "denied access",
-        "anti-spam", "反爬虫", "防采集",
+        "验证码", "captcha", "访问限制", "rate limit", "访问异常",
+        "安全验证", "请完成验证",  "robot check",
+        "security check",
         "为了保障您的访问安全", "检测到异常访问", "请完成下方验证后继续",
         "您的请求过于频繁", "请稍后再试", "请输入验证码继续访问",
     )
     antibot_titles: Tuple[str, ...] = (
-        "验证", "captcha", "安全验证", "访问限制", "403", "access denied",
-        "robot check", "human verification", "verification required",
+        "验证", "captcha", "安全验证", "访问限制","access denied",
+        "robot check", "verification required",
     )
     captcha_selectors: Tuple[str, ...] = (
         ".captcha", ".verification-code", ".security-check", "#captcha",
