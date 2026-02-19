@@ -1264,7 +1264,8 @@ class BaseSpider(ABC):
         if not self.db_handler:
             return []
 
-        platform = getattr(self, "platform", None) or getattr(self, "site_key", None) or "qidian"
+        platform = getattr(self, "site_key", None) or getattr(self, "platform", None) or "qidian"
+        platform = str(platform).lower()
 
         for name in ("get_first_n_chapters", "get_novel_chapters"):
             fn = getattr(self.db_handler, name, None)

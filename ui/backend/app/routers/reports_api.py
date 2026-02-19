@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from ..settings import settings
 from ..utils import load_repo_config, get_output_paths
 
-router = APIRouter(prefix="/api/reports", tags=["reports"])
+router = APIRouter(prefix="/reports", tags=["reports"])
 
 def _reports_dir(repo_cfg) -> Path:
     out = get_output_paths(repo_cfg)

@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from ..settings import settings
 from ..utils import load_repo_config, get_db_path
 
-router = APIRouter(prefix="/api/db", tags=["db"])
+router = APIRouter(prefix="/db", tags=["db"])
 
 def _connect(db_path: str) -> sqlite3.Connection:
     con = sqlite3.connect(db_path)

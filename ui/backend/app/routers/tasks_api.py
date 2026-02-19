@@ -8,7 +8,7 @@ from ..utils import load_repo_config, get_output_paths
 from ..store import TaskStore, Task, new_task_id
 from ..runner import ProcessRunner
 
-router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 def _runs_dir(repo_cfg) -> Path:
     out = get_output_paths(repo_cfg)

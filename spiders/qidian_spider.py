@@ -299,6 +299,7 @@ class QidianSpider(BaseSpider):
             pass
         except Exception as e:
             self.logger.warning(f"从 config 获取 rank_type_map 失败: {e}")
+        return {}
 
     # ------------------------------------------------------------------
     # Rank Page Parsing -> novel_id, category, tag, title, author, intro
@@ -2187,7 +2188,11 @@ class QidianSpider(BaseSpider):
 
                 # 调试：检查章节发布时间
                 self.logger.info(f"[章节保存]准备保存小说 {b.get('title')} 的章节")
-                max_log_chapters = self.config.get("max_log_chapters", 5)
+                crawler_cfg = getattr(config, "CRAWLER_CONFIG", {}) or {}
+                max_log_chapters = int(self.site_config.get(
+                    "max_log_chapters",
+                    crawler_cfg.get("max_log_chapters", 5)
+                ))
                 for i, chapter in enumerate(chapters[:max_log_chapters], 1):
                     publish_date = chapter.get('publish_date', '')
                     self.logger.info(f"[章节保存] 章节{i}发布时间: {publish_date}")

@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from ..settings import settings
 from ..utils import load_repo_config, get_output_paths, get_rank_keys
 
-router = APIRouter(prefix="/api/config", tags=["config"])
+router = APIRouter(prefix="/config", tags=["config"])
 
 class ConfigOverride(BaseModel):
     platform: str | None = Field(default=None, description="qidian|fanqie")
