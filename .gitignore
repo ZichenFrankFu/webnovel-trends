@@ -34,3 +34,10 @@ outputs/config_runs/*
 # OS
 .DS_Store
 Thumbs.db
+
+# Exe
+*.exe
+*.spec
+build/
+dist/
+build_temp/
